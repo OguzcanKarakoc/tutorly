@@ -131,7 +131,7 @@ function loadAgentSdk() {
 function errMessage(e) {
   const msg = (e && e.message) || '';
   if (e instanceof Anthropic.AuthenticationError || /resolve authentication method/i.test(msg)) {
-    return 'No working credentials. Add an API key in Settings, or set ANTHROPIC_API_KEY / run `ant auth login`, then restart Teach.';
+    return 'No working credentials. Add an API key in Settings, or set ANTHROPIC_API_KEY / run `ant auth login`, then restart Tutorly.';
   }
   if (/invalid api key|not logged in|please run \/login|oauth|credentials/i.test(msg)) {
     return 'Claude Code isn’t signed in. Run `claude` in a terminal, sign in with /login, then try again.';

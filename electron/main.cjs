@@ -12,8 +12,8 @@ if (process.env.TEACH_SCREENSHOT) {
 
 // ---------- persistence ----------
 
-const dataPath = () => path.join(app.getPath('userData'), 'teach-data.json');
-const settingsPath = () => path.join(app.getPath('userData'), 'teach-settings.json');
+const dataPath = () => path.join(app.getPath('userData'), 'tutorly-data.json');
+const settingsPath = () => path.join(app.getPath('userData'), 'tutorly-settings.json');
 
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return fallback; }
@@ -193,7 +193,7 @@ function createWindow() {
     height: 820,
     minWidth: 700,
     minHeight: 520,
-    title: 'Teach',
+    title: 'Tutorly',
     backgroundColor: '#f6f8fb',
     autoHideMenuBar: true,
     webPreferences: {

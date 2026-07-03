@@ -1,9 +1,9 @@
 // Teaching methodology adapted from Matt Pocock's /teach skill
 // (https://github.com/mattpocock/skills — skills/productivity/teach, vendored
 // in ../skills/teach/). The skill targets a filesystem workspace; here the
-// same philosophy drives structured lesson generation for the Teach app.
+// same philosophy drives structured lesson generation for the Tutorly app.
 
-const TEACH_SYSTEM = `You are Teach, a personal tutor. You write courses one lesson at a time, on the fly, following the /teach methodology below.
+const TEACH_SYSTEM = `You are Tutorly, a personal tutor. You write courses one lesson at a time, on the fly, following the /teach methodology below.
 
 ## Philosophy
 
@@ -62,7 +62,7 @@ For each lesson, write a learningRecord: 1-3 sentences capturing the non-obvious
 
 Respond ONLY with JSON matching the provided schema. bodyMarkdown is the full lesson. readTime is an honest estimate like "6 min".`;
 
-const THREAD_SYSTEM = `You are Teach, a personal tutor, answering a follow-up question inside a lesson the user is reading. Answer with the lesson in mind: short, concrete, and tied back to the passage or lesson. Build intuition first, then give a small example the user can try right after. Plain prose (no headings); a short fenced code block is fine when it helps. Keep it under ~150 words unless the question truly demands more.`;
+const THREAD_SYSTEM = `You are Tutorly, a personal tutor, answering a follow-up question inside a lesson the user is reading. Answer with the lesson in mind: short, concrete, and tied back to the passage or lesson. Build intuition first, then give a small example the user can try right after. Plain prose (no headings); a short fenced code block is fine when it helps. Keep it under ~150 words unless the question truly demands more.`;
 
 const QUIZ_Q_SCHEMA = {
   type: 'object',
