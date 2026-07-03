@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('teach', {
   disconnect: () => ipcRenderer.invoke('agent:disconnect'),
   setMethod: (method) => ipcRenderer.invoke('agent:setMethod', method),
   setModel: (model) => ipcRenderer.invoke('agent:setModel', model),
+  setBaseUrl: (url) => ipcRenderer.invoke('agent:setBaseUrl', url),
+  listModels: () => ipcRenderer.invoke('agent:models'),
   startCourse: (payload) => ipcRenderer.invoke('teach:start', payload),
   nextLesson: (payload) => ipcRenderer.invoke('teach:next', payload),
   askThread: (payload) => ipcRenderer.invoke('teach:thread', payload),
@@ -18,6 +20,7 @@ contextBridge.exposeInMainWorld('teach', {
     return () => ipcRenderer.removeListener('agent:log', h);
   },
   getVersion: () => ipcRenderer.invoke('app:version'),
+  openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   checkUpdate: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),

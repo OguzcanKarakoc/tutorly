@@ -28,16 +28,28 @@ function preview(s, n = 400) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-// method 'cli'  → Claude Agent SDK, driving the local Claude Code sign-in
-//                 (subscription auth, no API key).
-// method 'api'  → Anthropic SDK with an API key / env credentials.
-let cfg = { method: 'cli', apiKey: '', model: DEFAULT_MODEL };
+// method 'cli'   → Claude Agent SDK, driving the local Claude Code sign-in
+//                  (subscription auth, no API key).
+// method 'api'   → Anthropic SDK with an API key / env credentials.
+// method 'local' → any OpenAI-compatible server (Ollama, LM Studio, llama.cpp,
+//                  Jan, …) at baseUrl; models are discovered from the server.
+const DEFAULT_LOCAL_URL = 'http://localhost:11434/v1';
+let cfg = { method: 'cli', apiKey: '', model: DEFAULT_MODEL, baseUrl: DEFAULT_LOCAL_URL };
 let client = null;
 let sdkPromise = null;
+
+// The Anthropic models Claude Code / the API expose. Used as-is for those
+// backends (and as a fallback if the live models list can't be fetched).
+const STATIC_MODELS = [
+  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+];
 
 function configure(next) {
   cfg = { ...cfg, ...next };
   if (!cfg.model) cfg.model = DEFAULT_MODEL;
+  if (!cfg.baseUrl) cfg.baseUrl = DEFAULT_LOCAL_URL;
   client = null;
   return cfg;
 }
@@ -47,6 +59,67 @@ function getApiClient() {
   // an `ant auth login` profile.
   if (!client) client = new Anthropic(cfg.apiKey ? { apiKey: cfg.apiKey } : {});
   return client;
+}
+
+// ---------- local (OpenAI-compatible) backend ----------
+
+function localBase() { return String(cfg.baseUrl || DEFAULT_LOCAL_URL).replace(/\/+$/, ''); }
+// No Authorization header: local runtimes (Ollama, LM Studio, …) don't need one,
+// and the shared apiKey may be an Anthropic key we must not send to a user URL.
+function localHeaders() { return { 'Content-Type': 'application/json' }; }
+
+// List the models a local server actually has (GET /v1/models).
+async function listLocalModels() {
+  const res = await fetch(localBase() + '/models', { headers: localHeaders() });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' from ' + localBase() + '/models');
+  const data = await res.json();
+  const arr = (data && data.data) || [];
+  return arr.map((m) => ({ id: m.id, label: m.id })).filter((m) => m.id);
+}
+
+// Models available for the current backend, as [{ id, label }].
+async function listModels() {
+  if (cfg.method === 'local') return listLocalModels();
+  if (cfg.method === 'api') {
+    try {
+      const page = await getApiClient().models.list();
+      const out = [];
+      for (const m of (page.data || [])) out.push({ id: m.id, label: m.display_name || m.id });
+      if (out.length) return out;
+    } catch (e) { /* fall back to static */ }
+    return STATIC_MODELS;
+  }
+  return STATIC_MODELS; // cli
+}
+
+async function localChat({ messages, jsonMode }) {
+  log('local', 'chat · model=' + cfg.model + ' · ' + localBase());
+  const t0 = Date.now();
+  const body = { model: cfg.model, messages, stream: false };
+  if (jsonMode) body.response_format = { type: 'json_object' };
+  const res = await fetch(localBase() + '/chat/completions', {
+    method: 'POST', headers: localHeaders(), body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = preview(await res.text().catch(() => ''), 200);
+    log('local', 'failed · HTTP ' + res.status + (detail ? ' · ' + detail : ''), 'error');
+    throw new Error('Local model error (HTTP ' + res.status + ')' + (detail ? ': ' + detail : ''));
+  }
+  const data = await res.json();
+  const content = (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+  log('local', 'done · ' + content.length + ' chars · ' + (Date.now() - t0) + 'ms');
+  return content;
+}
+
+// Local models don't reliably honor a JSON schema, so we ask for a JSON object
+// and tolerate code fences / surrounding prose when parsing.
+function parseJsonLoose(text) {
+  let s = String(text == null ? '' : text).trim();
+  s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  try { return JSON.parse(s); } catch (e) {}
+  const a = s.indexOf('{'), b = s.lastIndexOf('}');
+  if (a >= 0 && b > a) return JSON.parse(s.slice(a, b + 1));
+  throw new Error('The local model didn’t return valid JSON — try a more capable model.');
 }
 
 // The agent SDK is ESM-only; load it lazily from this CJS module.
@@ -68,6 +141,9 @@ function errMessage(e) {
   }
   if (/maximum number of turns/i.test(msg)) {
     return 'The lesson ran long and didn’t finish in one go — try a narrower topic, or regenerate.';
+  }
+  if (/ECONNREFUSED|fetch failed|ENOTFOUND|network|ECONNRESET/i.test(msg)) {
+    return 'Couldn’t reach the local model server. Make sure it’s running (e.g. `ollama serve`) and the server URL is correct.';
   }
   if (e instanceof Anthropic.RateLimitError) return 'Rate limited by the Anthropic API — try again in a moment.';
   if (e instanceof Anthropic.APIConnectionError) return 'Could not reach the Anthropic API — check your connection.';
@@ -159,6 +235,16 @@ async function apiGenerateJson({ system, userText, schema, maxTokens }) {
 
 async function generateJson(args) {
   if (cfg.method === 'cli') return cliRun(args);
+  if (cfg.method === 'local') {
+    const userText = args.userText +
+      '\n\nRespond with ONLY a single JSON object matching this JSON Schema — no markdown, no code fences, no commentary:\n' +
+      JSON.stringify(args.schema);
+    const text = await localChat({
+      messages: [{ role: 'system', content: args.system }, { role: 'user', content: userText }],
+      jsonMode: true,
+    });
+    return parseJsonLoose(text);
+  }
   return apiGenerateJson(args);
 }
 
@@ -171,6 +257,12 @@ async function verifyConnection() {
     });
     if (!reply) throw new Error('Claude Code replied with nothing.');
     return { model: cfg.model, displayName: 'Claude Code' };
+  }
+  if (cfg.method === 'local') {
+    const models = await listLocalModels();
+    if (!models.length) throw new Error('No models found at ' + localBase() + ' — pull one first (e.g. `ollama pull llama3.1`).');
+    const picked = models.find((m) => m.id === cfg.model) ? cfg.model : models[0].id;
+    return { model: picked, displayName: 'Local · ' + localBase() };
   }
   const m = await getApiClient().models.retrieve(cfg.model);
   return { model: m.id, displayName: m.display_name };
@@ -224,6 +316,18 @@ async function askThread({ course, lesson, quote, history, question }) {
     return cliRun({ system: THREAD_SYSTEM, userText: parts.join('\n') });
   }
 
+  if (cfg.method === 'local') {
+    const msgs = [
+      { role: 'system', content: THREAD_SYSTEM },
+      { role: 'user', content: contextText + '\n\nI have the lesson in front of me — ask me anything about it.' },
+      { role: 'assistant', content: 'Understood — what would you like to know?' },
+    ];
+    for (const m of history || []) msgs.push({ role: m.role === 'user' ? 'user' : 'assistant', content: m.text });
+    msgs.push({ role: 'user', content: question });
+    const text = await localChat({ messages: msgs });
+    return text.trim();
+  }
+
   const messages = [
     { role: 'user', content: contextText + '\n\nFirst question follows in the next messages.' },
     { role: 'assistant', content: 'Understood — I have the lesson in front of me. What would you like to know?' },
@@ -251,4 +355,4 @@ async function askThread({ course, lesson, quote, history, question }) {
   return message.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
 }
 
-module.exports = { configure, verifyConnection, startCourse, nextLesson, askThread, errMessage, DEFAULT_MODEL, log, onLog };
+module.exports = { configure, verifyConnection, listModels, startCourse, nextLesson, askThread, errMessage, DEFAULT_MODEL, log, onLog };

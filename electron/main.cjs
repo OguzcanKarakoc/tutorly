@@ -28,11 +28,11 @@ function loadSettings() {
   if (raw.apiKeyEnc && safeStorage.isEncryptionAvailable()) {
     try { apiKey = safeStorage.decryptString(Buffer.from(raw.apiKeyEnc, 'base64')); } catch (e) {}
   }
-  return { method: raw.method || 'cli', model: raw.model || agent.DEFAULT_MODEL, connected: !!raw.connected, apiKey };
+  return { method: raw.method || 'cli', model: raw.model || agent.DEFAULT_MODEL, connected: !!raw.connected, apiKey, baseUrl: raw.baseUrl || 'http://localhost:11434/v1' };
 }
 
-function saveSettings({ method, model, connected, apiKey }) {
-  const raw = { method, model, connected };
+function saveSettings({ method, model, connected, apiKey, baseUrl }) {
+  const raw = { method, model, connected, baseUrl };
   if (apiKey && safeStorage.isEncryptionAvailable()) {
     raw.apiKeyEnc = safeStorage.encryptString(apiKey).toString('base64');
   }
@@ -84,14 +84,17 @@ function setupUpdater() {
 // ---------- IPC ----------
 
 let settings = null;
+function configureAgent() {
+  agent.configure({ method: settings.method, apiKey: settings.apiKey, model: settings.model, baseUrl: settings.baseUrl });
+}
 
 function registerIpc() {
   settings = loadSettings();
-  agent.configure({ method: settings.method, apiKey: settings.apiKey, model: settings.model });
+  configureAgent();
 
   ipcMain.handle('state:load', () => ({
     data: readJson(dataPath(), null),
-    settings: { method: settings.method, model: settings.model, connected: settings.connected, hasApiKey: !!settings.apiKey },
+    settings: { method: settings.method, model: settings.model, connected: settings.connected, hasApiKey: !!settings.apiKey, baseUrl: settings.baseUrl },
   }));
 
   ipcMain.handle('state:save', (_e, data) => { writeJson(dataPath(), data); return true; });
@@ -100,6 +103,7 @@ function registerIpc() {
   ipcMain.handle('log:clear', () => { logBuffer.length = 0; return true; });
 
   ipcMain.handle('app:version', () => app.getVersion());
+  ipcMain.handle('app:openExternal', (_e, url) => { try { if (/^https?:\/\//i.test(url)) shell.openExternal(url); } catch (e) {} return true; });
   ipcMain.handle('update:check', () => {
     if (!app.isPackaged) { sendUpdate({ type: 'none' }); return { ok: false, error: 'Updates only run in a packaged build.' }; }
     autoUpdater.checkForUpdates().catch((e) => sendUpdate({ type: 'error', message: (e && e.message) || String(e) }));
@@ -111,14 +115,22 @@ function registerIpc() {
   });
   ipcMain.handle('update:install', () => { autoUpdater.quitAndInstall(); return { ok: true }; });
 
-  ipcMain.handle('agent:connect', async (_e, { method, apiKey, model }) => {
+  ipcMain.handle('agent:models', async () => {
+    try { return { ok: true, models: await agent.listModels() }; }
+    catch (e) { agent.log('connect', 'list models failed · ' + ((e && e.message) || e), 'error'); return { ok: false, error: agent.errMessage(e) }; }
+  });
+
+  ipcMain.handle('agent:connect', async (_e, { method, apiKey, model, baseUrl }) => {
     try {
       if (method) settings.method = method;
       if (apiKey) settings.apiKey = apiKey;
       if (model) settings.model = model;
-      agent.configure({ method: settings.method, apiKey: settings.apiKey, model: settings.model });
+      if (baseUrl) settings.baseUrl = baseUrl;
+      configureAgent();
       const info = await agent.verifyConnection();
+      if (info.model) settings.model = info.model;
       settings.connected = true;
+      configureAgent();
       saveSettings(settings);
       return { ok: true, model: info.model, displayName: info.displayName };
     } catch (e) {
@@ -132,21 +144,28 @@ function registerIpc() {
     settings.connected = false;
     settings.apiKey = '';
     saveSettings(settings);
-    agent.configure({ method: settings.method, apiKey: '', model: settings.model });
+    configureAgent();
     return { ok: true };
   });
 
   ipcMain.handle('agent:setMethod', (_e, method) => {
     settings.method = method;
     saveSettings(settings);
-    agent.configure({ method, apiKey: settings.apiKey, model: settings.model });
+    configureAgent();
     return { ok: true };
   });
 
   ipcMain.handle('agent:setModel', (_e, model) => {
     settings.model = model;
     saveSettings(settings);
-    agent.configure({ method: settings.method, apiKey: settings.apiKey, model });
+    configureAgent();
+    return { ok: true };
+  });
+
+  ipcMain.handle('agent:setBaseUrl', (_e, baseUrl) => {
+    settings.baseUrl = baseUrl;
+    saveSettings(settings);
+    configureAgent();
     return { ok: true };
   });
 

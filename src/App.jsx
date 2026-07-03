@@ -42,7 +42,7 @@ export default class App extends React.Component {
     askBtn: null,
     picker: null,
     settingsOpen: false,
-    agent: { method: 'cli', connected: false, hasApiKey: false, apiKey: '', model: 'claude-opus-4-8', connecting: false, error: '' },
+    agent: { method: 'cli', connected: false, hasApiKey: false, apiKey: '', model: 'claude-opus-4-8', baseUrl: 'http://localhost:11434/v1', connecting: false, error: '', models: [], modelsLoading: false, modelsError: '' },
     mobileNav: false,
     vw: (typeof window !== 'undefined' ? window.innerWidth : 1280),
     collapsed: {},
@@ -72,8 +72,9 @@ export default class App extends React.Component {
           completed: (data && data.completed) || {},
           threads: (data && data.threads) || {},
           quiz: (data && data.quiz) || {},
-          agent: { ...s.agent, method: settings.method || s.agent.method, model: settings.model || s.agent.model, connected: !!settings.connected, hasApiKey: !!settings.hasApiKey },
+          agent: { ...s.agent, method: settings.method || s.agent.method, model: settings.model || s.agent.model, connected: !!settings.connected, hasApiKey: !!settings.hasApiKey, baseUrl: settings.baseUrl || s.agent.baseUrl },
         }));
+        this.refreshModels();
       }).catch(() => {});
     }
     if (api && api.onLog) {
@@ -508,19 +509,40 @@ export default class App extends React.Component {
 
   // ---------- settings ----------
 
-  onOpenSettings = () => this.setState({ settingsOpen: true, mobileNav: false });
+  onOpenSettings = () => { this.setState({ settingsOpen: true, mobileNav: false }); this.refreshModels(); };
   onCloseSettings = () => this.setState({ settingsOpen: false });
   setAgent = (patch) => this.setState(s => ({ agent: { ...s.agent, ...patch } }));
   onApiKey = (e) => this.setAgent({ apiKey: e.target.value });
-  onAgentMethod = (m) => { this.setAgent({ method: m, connected: false, error: '' }); if (api) api.setMethod(m).catch(() => {}); };
+  onBaseUrl = (e) => this.setAgent({ baseUrl: e.target.value });
+  onAgentMethod = (m) => { this.setAgent({ method: m, connected: false, error: '', models: [], modelsError: '' }); if (api) api.setMethod(m).then(() => this.refreshModels()).catch(() => {}); };
   onModel = (m) => { this.setAgent({ model: m }); if (api) api.setModel(m).catch(() => {}); };
-  onCopyCmd = () => { try { navigator.clipboard.writeText('npm install -g @anthropic-ai/claude-code && claude'); } catch (e) {} };
+  openDocs = (url) => { if (api && api.openExternal) api.openExternal(url); else if (typeof window !== 'undefined') window.open(url, '_blank'); };
+
+  // Ask the backend which models are actually available for the current
+  // provider (live for Local/API, static list for Claude Code).
+  refreshModels = () => {
+    if (!api || !api.listModels) return;
+    const method = this.state.agent.method;
+    this.setAgent({ modelsLoading: true, modelsError: '' });
+    const prep = (method === 'local' && api.setBaseUrl) ? api.setBaseUrl(this.state.agent.baseUrl) : Promise.resolve();
+    prep.catch(() => {}).then(() => api.listModels()).then(res => {
+      if (this.state.agent.method !== method) return; // provider changed while loading
+      if (res && res.ok) {
+        const models = res.models || [];
+        this.setAgent({ models, modelsLoading: false, modelsError: models.length ? '' : 'No models found.' });
+        if (models.length && !models.find(m => m.id === this.state.agent.model)) this.onModel(models[0].id);
+      } else {
+        this.setAgent({ models: [], modelsLoading: false, modelsError: (res && res.error) || 'Couldn’t list models.' });
+      }
+    }).catch(() => this.setAgent({ models: [], modelsLoading: false, modelsError: 'Couldn’t list models.' }));
+  };
+
   onConnect = () => {
     const a = this.state.agent;
     if (a.connecting) return;
     this.setAgent({ connecting: true, error: '' });
-    (api ? api.connect({ method: a.method, apiKey: a.apiKey || undefined, model: a.model }) : Promise.resolve({ ok: false, error: 'Agent bridge unavailable.' })).then(res => {
-      if (res.ok) this.setAgent({ connected: true, connecting: false, hasApiKey: this.state.agent.apiKey ? true : this.state.agent.hasApiKey, apiKey: '', error: '' });
+    (api ? api.connect({ method: a.method, apiKey: a.apiKey || undefined, model: a.model, baseUrl: a.baseUrl }) : Promise.resolve({ ok: false, error: 'Agent bridge unavailable.' })).then(res => {
+      if (res.ok) { this.setAgent({ connected: true, connecting: false, hasApiKey: this.state.agent.apiKey ? true : this.state.agent.hasApiKey, apiKey: '', error: '', model: res.model || this.state.agent.model }); this.refreshModels(); }
       else this.setAgent({ connected: false, connecting: false, error: res.error });
     });
   };
@@ -741,16 +763,21 @@ export default class App extends React.Component {
 
     // ---- settings / agent ----
     const ag = s.agent, connected = ag.connected;
-    const modelLabel = (MODELS.find(m => m.id === ag.model) || MODELS[0]).label;
+    const isCli = ag.method === 'cli', isApi = ag.method === 'api', isLocal = ag.method === 'local';
+    // Model choices come from the backend (live for API/Local, static for CLI).
+    const modelList = (ag.models && ag.models.length) ? ag.models : (isLocal ? [] : MODELS);
+    const modelLabel = (modelList.find(m => m.id === ag.model) || {}).label || ag.model || (MODELS[0] && MODELS[0].label);
     const agentPill = connected
       ? { label: 'Connected', color: '#15803d', bg: '#ecfdf5', dot: '#16a34a' }
       : { label: 'Offline', color: t.sub, bg: t.railHover, dot: '#b3afa8' };
     const PROVIDERS = [
-      { id: 'cli', title: 'Claude Code', desc: 'Uses your Claude Code sign-in — no API key', badge: 'C', soon: false },
-      { id: 'api', title: 'Anthropic API', desc: 'Claude via an Anthropic API key', badge: 'A', soon: false },
-      { id: 'copilot', title: 'GitHub Copilot', desc: 'Use your Copilot subscription', badge: 'GH', soon: true },
-      { id: 'cursor', title: 'Cursor Agent', desc: 'Connect the Cursor agent', badge: 'Cu', soon: true },
+      { id: 'cli', title: 'Claude Code', desc: 'Uses your Claude Code sign-in — no API key', badge: 'C', soon: false, docs: 'https://docs.claude.com/en/docs/claude-code' },
+      { id: 'api', title: 'Anthropic API', desc: 'Claude via an Anthropic API key', badge: 'A', soon: false, docs: 'https://console.anthropic.com/settings/keys' },
+      { id: 'local', title: 'Local model', desc: 'Ollama, LM Studio — any OpenAI-compatible server', badge: 'L', soon: false, docs: 'https://ollama.com/download' },
+      { id: 'copilot', title: 'GitHub Copilot', desc: 'Use your Copilot subscription', badge: 'GH', soon: true, docs: 'https://docs.github.com/copilot' },
+      { id: 'cursor', title: 'Cursor Agent', desc: 'Connect the Cursor agent', badge: 'Cu', soon: true, docs: 'https://docs.cursor.com' },
     ];
+    const currentProvider = PROVIDERS.find(p => p.id === ag.method) || PROVIDERS[0];
     const agentProviders = PROVIDERS.map(p => {
       const on = !p.soon && ag.method === p.id;
       return {
@@ -763,29 +790,33 @@ export default class App extends React.Component {
         tagStyle: { flexShrink: 0, fontSize: '10.5px', fontWeight: 600, letterSpacing: '0.03em', textTransform: 'uppercase', padding: '3px 8px', borderRadius: '999px', color: p.soon ? t.faint : '#15803d', background: p.soon ? t.railHover : '#ecfdf5' },
       };
     });
-    const modelOptions = MODELS.map(m => {
+    const modelOptions = modelList.map(m => {
       const on = ag.model === m.id;
-      return { id: m.id, label: m.label, onPick: () => this.onModel(m.id),
-        style: { border: '1.5px solid ' + (on ? t.accent : t.border), background: on ? t.accent + '10' : '#fff', color: on ? t.accent : t.sub, borderRadius: '999px', padding: '7px 14px', fontFamily: 'inherit', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.15s' },
+      return { id: m.id, label: m.label || m.id, onPick: () => this.onModel(m.id),
+        style: { border: '1.5px solid ' + (on ? t.accent : t.border), background: on ? t.accent + '10' : '#fff', color: on ? t.accent : t.sub, borderRadius: '999px', padding: '7px 14px', fontFamily: 'inherit', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.15s', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
         hover: on ? '' : 'border-color: ' + t.accent + ';' };
     });
-    const isCli = ag.method === 'cli';
+    const providerName = isCli ? 'Claude Code' : isApi ? 'Anthropic API' : isLocal ? 'Local' : currentProvider.title;
     const settingsVals = {
       settingsOpen: s.settingsOpen, onOpenSettings: this.onOpenSettings, onCloseSettings: this.onCloseSettings,
       agentPill, agentProviders, modelOptions,
-      methodIsCli: isCli, methodIsApi: !isCli,
-      onCopyCmd: this.onCopyCmd,
+      methodIsCli: isCli, methodIsApi: isApi, methodIsLocal: isLocal,
+      providerDocs: currentProvider.docs, onOpenDocs: () => this.openDocs(currentProvider.docs),
       agentApiKey: ag.apiKey, onApiKey: this.onApiKey,
       apiKeyPlaceholder: ag.hasApiKey ? '••••••••  (key saved — enter a new one to replace)' : 'sk-ant-…  (optional if set via environment)',
+      baseUrl: ag.baseUrl, onBaseUrl: this.onBaseUrl,
+      onRefreshModels: this.refreshModels, modelsLoading: ag.modelsLoading, modelsError: ag.modelsError,
+      modelListEmpty: modelOptions.length === 0,
+      showModelRefresh: isLocal || isApi,
       agentConnected: connected, agentDisconnected: !connected,
       onConnect: this.onConnect, onDisconnect: this.onDisconnect,
-      connectLabel: ag.connecting ? 'Connecting…' : (isCli ? 'Connect Claude Code' : 'Connect'),
+      connectLabel: ag.connecting ? 'Connecting…' : (isCli ? 'Connect Claude Code' : isLocal ? 'Connect local model' : 'Connect'),
       connectBtnBg: ag.connecting ? '#cdcac4' : t.accent,
       agentHint: ag.error ? ag.error : (connected ? ('Teach is generating with ' + modelLabel + '.') : 'Connect to start generating lessons.'),
       agentHintColor: ag.error ? '#dc2626' : t.faint,
       agentCard: connected
-        ? { title: (isCli ? 'Claude Code · ' : 'Anthropic API · ') + modelLabel, subtitle: isCli ? 'Using your local Claude Code sign-in' : (ag.hasApiKey ? 'Using your saved API key' : 'Using environment credentials'), border: '#a7f3d0', bg: '#ecfdf5', iconBg: '#16a34a', iconColor: '#fff' }
-        : { title: 'No agent connected', subtitle: 'Teach needs Claude to write lessons.', border: t.border, bg: '#fff', iconBg: t.railHover, iconColor: t.sub },
+        ? { title: providerName + ' · ' + modelLabel, subtitle: isCli ? 'Using your local Claude Code sign-in' : isLocal ? ag.baseUrl : (ag.hasApiKey ? 'Using your saved API key' : 'Using environment credentials'), border: '#a7f3d0', bg: '#ecfdf5', iconBg: '#16a34a', iconColor: '#fff' }
+        : { title: 'No agent connected', subtitle: 'Teach needs a model to write lessons.', border: t.border, bg: '#fff', iconBg: t.railHover, iconColor: t.sub },
     };
 
     return {
@@ -1232,14 +1263,12 @@ export default class App extends React.Component {
 
             {v.methodIsCli && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Teach talks to your local Claude Code and uses the account you're already signed in with — no API key needed. If you don't have it yet, install and sign in once:</div>
-                <div style={{ position: 'relative', background: '#1c1b19', borderRadius: 12, padding: '14px 44px 14px 16px', fontFamily: "'Geist Mono', monospace", fontSize: 13, color: '#e9e7e2', overflowX: 'auto', whiteSpace: 'nowrap' }}>
-                  {'npm install -g @anthropic-ai/claude-code && claude'}
-                  <H as="button" onClick={v.onCopyCmd} title="Copy" style={{ position: 'absolute', right: 8, top: 8, border: 'none', background: 'rgba(255,255,255,0.1)', color: '#e9e7e2', borderRadius: 8, padding: 6, cursor: 'pointer', display: 'flex' }} hover="background: rgba(255,255,255,0.2);">
-                    <Svg size={14}><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></Svg>
-                  </H>
-                </div>
-                <div style={{ fontSize: '12.5px', color: t.faint, lineHeight: 1.5 }}>Then use <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>/login</span> inside Claude Code. Connect runs a quick test message to confirm everything works.</div>
+                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Teach talks to your local Claude Code and uses the account you're already signed in with — no API key needed. If you don't have it yet, install it and sign in once with <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>/login</span>. Connect runs a quick test message to confirm it works.</div>
+                <H as="button" onClick={v.onOpenDocs} style={{ alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 7, border: `1px solid ${t.border}`, background: '#fff', color: t.ink, borderRadius: 10, padding: '8px 13px', fontFamily: 'inherit', fontSize: 13, fontWeight: 500, cursor: 'pointer' }} hover={t.accentBorderCss}>
+                  <Svg size={14}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></Svg>
+                  Read the Claude Code install guide
+                  <Svg size={13}><path d="M7 17L17 7M7 7h10v10" /></Svg>
+                </H>
               </div>
             )}
 
@@ -1250,16 +1279,40 @@ export default class App extends React.Component {
                   <span style={{ fontSize: '12.5px', color: t.faint, flexShrink: 0 }}>API key</span>
                   <input type="password" value={v.agentApiKey} onChange={v.onApiKey} placeholder={v.apiKeyPlaceholder} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: "'Geist Mono', monospace", fontSize: 13, color: t.ink, padding: '8px 0' }} />
                 </div>
+                <button onClick={v.onOpenDocs} style={{ alignSelf: 'flex-start', border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: '12.5px', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>Get an API key →</button>
+              </div>
+            )}
+
+            {v.methodIsLocal && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Point Teach at any OpenAI-compatible server running on your machine or network — <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>Ollama</span>, LM Studio, llama.cpp, and others. Teach reads the model list straight from the server. Nothing leaves your machine.</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: `1.5px solid ${t.border}`, borderRadius: 11, padding: '4px 4px 4px 14px' }}>
+                  <span style={{ fontSize: '12.5px', color: t.faint, flexShrink: 0 }}>Server URL</span>
+                  <input type="text" value={v.baseUrl} onChange={v.onBaseUrl} placeholder="http://localhost:11434/v1" spellCheck={false} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: "'Geist Mono', monospace", fontSize: 13, color: t.ink, padding: '8px 0' }} />
+                  <H as="button" onClick={v.onRefreshModels} title="Reload models from this server" style={{ border: `1px solid ${t.border}`, background: '#fff', color: t.sub, borderRadius: 8, padding: '6px 10px', fontFamily: 'inherit', fontSize: '12px', cursor: 'pointer', flexShrink: 0 }} hover={t.accentBorderCss}>{v.modelsLoading ? 'Loading…' : 'Reload'}</H>
+                </div>
+                <button onClick={v.onOpenDocs} style={{ alignSelf: 'flex-start', border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: '12.5px', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>Install Ollama →</button>
               </div>
             )}
 
             <div>
-              <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: t.faint, marginBottom: 9 }}>Model</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {v.modelOptions.map(mo => (
-                  <H as="button" key={mo.id} onClick={mo.onPick} style={mo.style} hover={mo.hover}>{mo.label}</H>
-                ))}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 9 }}>
+                <div style={{ flex: 1, fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: t.faint }}>Model</div>
+                {v.showModelRefresh && (
+                  <button onClick={v.onRefreshModels} style={{ border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: '11.5px', cursor: 'pointer', padding: 0 }}>{v.modelsLoading ? 'Loading…' : '↻ Refresh'}</button>
+                )}
               </div>
+              {v.modelOptions.length > 0 ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {v.modelOptions.map(mo => (
+                    <H as="button" key={mo.id} onClick={mo.onPick} style={mo.style} hover={mo.hover}>{mo.label}</H>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: '12.5px', color: v.modelsError ? '#dc2626' : t.faint, lineHeight: 1.5, padding: '4px 0' }}>
+                  {v.modelsLoading ? 'Loading models…' : (v.modelsError || (v.methodIsLocal ? 'No models found — start your server and pull a model, then Reload.' : 'No models available.'))}
+                </div>
+              )}
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 4, borderTop: `1px solid ${t.borderSoft}` }}>
