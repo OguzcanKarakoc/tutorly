@@ -5,10 +5,10 @@
   "description": "Teach — every course is written on the fly",
   "private": true,
   "author": "Oguzcan Karakoc",
-  "homepage": "https://github.com/OguzcanKarakoc/teach-electron",
+  "homepage": "https://github.com/OguzcanKarakoc/teach",
   "repository": {
     "type": "git",
-    "url": "https://github.com/OguzcanKarakoc/teach-electron.git"
+    "url": "https://github.com/OguzcanKarakoc/teach.git"
   },
   "main": "electron/main.cjs",
   "scripts": {
@@ -37,7 +37,7 @@
     "publish": {
       "provider": "github",
       "owner": "OguzcanKarakoc",
-      "repo": "teach-electron"
+      "repo": "teach"
     },
     "mac": {
       "target": [
