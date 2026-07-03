@@ -823,6 +823,7 @@ export default class App extends React.Component {
       t,
       showApp: true,
       debugOpen: s.debugOpen, logs: s.logs, onToggleDebug: this.toggleDebug, onClearDebug: this.clearLogs,
+      onOpenTeachSkill: () => this.openDocs('https://github.com/mattpocock/skills'),
       appVersion: s.appVersion, update: s.update, updateDismissed: s.updateDismissed,
       onCheckUpdate: this.checkUpdate, onDownloadUpdate: this.downloadUpdate, onInstallUpdate: this.installUpdate, onDismissUpdate: this.dismissUpdate,
       landingInput: s.landingInput, placeholder: this.placeholders[s.phIndex], inputBorder: s.focused ? t.accent : t.border,
@@ -911,6 +912,14 @@ export default class App extends React.Component {
         </div>
 
         <div style={{ borderTop: `1px solid ${t.border}`, padding: '8px 10px' }}>
+          <H onClick={v.onOpenTeachSkill} title="The original /teach skill by Matt Pocock — opens GitHub" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 10, cursor: 'pointer' }} hover={t.railHoverCss}>
+            <Svg size={16} stroke={t.accent} style={{ flexShrink: 0 }}><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z" /></Svg>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: t.ink }}>Built on the <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>/teach</span> skill</div>
+              <div style={{ fontSize: '11px', color: t.faint, marginTop: 1 }}>by Matt Pocock · GitHub</div>
+            </div>
+            <Svg size={13} stroke={t.faint} style={{ flexShrink: 0 }}><path d="M7 17L17 7M7 7h10v10" /></Svg>
+          </H>
           <H onClick={v.onToggleDebug} title="Agent activity console (⌘`)" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 10, cursor: 'pointer' }} hover={t.railHoverCss}>
             <Svg size={16} stroke={v.debugOpen ? t.accent : t.sub} style={{ flexShrink: 0 }}><path d="M4 17l6-6-6-6" /><path d="M12 19h8" /></Svg>
             <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: v.debugOpen ? t.accent : t.ink }}>Debug console</div>
@@ -935,12 +944,9 @@ export default class App extends React.Component {
   renderLanding(v) {
     const t = v.t;
     return (
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ height: 56, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 11, padding: '0 22px' }}>
-          <button onClick={v.onOpenMobile} style={{ display: v.hamburgerDisplay, border: 'none', background: 'transparent', cursor: 'pointer', color: t.sub, padding: 6, marginLeft: -6 }}><IcnMenu /></button>
-        </div>
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px 24px 90px', background: t.landingBg }}>
-          <div style={{ width: '100%', maxWidth: 620, display: 'flex', flexDirection: 'column', alignItems: 'center', animation: 'tuiFadeUp 0.5s cubic-bezier(0.22,1,0.36,1)' }}>
+      <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px 24px 90px', background: t.landingBg }}>
+        <button onClick={v.onOpenMobile} style={{ position: 'absolute', top: 14, left: 16, display: v.hamburgerDisplay, border: 'none', background: 'transparent', cursor: 'pointer', color: t.sub, padding: 6, zIndex: 2 }}><IcnMenu /></button>
+        <div style={{ width: '100%', maxWidth: 620, display: 'flex', flexDirection: 'column', alignItems: 'center', animation: 'tuiFadeUp 0.5s cubic-bezier(0.22,1,0.36,1)' }}>
             <h1 style={{ fontSize: 44, lineHeight: 1.06, fontWeight: 500, letterSpacing: '-0.03em', textAlign: 'center', margin: '0 0 32px', color: t.ink }}>What would you like to learn?</h1>
             <div style={{ width: '100%', position: 'relative', background: '#fff', border: `1.5px solid ${v.inputBorder}`, borderRadius: 20, boxShadow: '0 14px 40px -20px rgba(28,27,25,0.24), 0 2px 8px rgba(0,0,0,0.03)', transition: 'border-color 0.2s' }}>
               <textarea value={v.landingInput} onChange={v.onLandingInput} onKeyDown={v.onLandingKey} onFocus={v.onFocus} onBlur={v.onBlur} rows={1} placeholder={v.placeholder} style={{ width: '100%', border: 'none', outline: 'none', resize: 'none', background: 'transparent', fontFamily: 'inherit', fontSize: 18, lineHeight: 1.5, color: t.ink, padding: '19px 58px 19px 22px', maxHeight: 180, display: 'block' }} />
@@ -956,7 +962,6 @@ export default class App extends React.Component {
             <div style={{ fontSize: 12, color: t.faint, marginTop: 26 }}>Every course is written on the fly with the <span style={{ fontFamily: "'Geist Mono', monospace" }}>/teach</span> skill.</div>
           </div>
         </div>
-      </div>
     );
   }
 
