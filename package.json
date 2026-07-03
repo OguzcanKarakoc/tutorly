@@ -1,14 +1,14 @@
 {
-  "name": "teach",
-  "productName": "Teach",
-  "version": "1.0.1",
-  "description": "Teach — every course is written on the fly",
+  "name": "tutorly",
+  "productName": "Tutorly",
+  "version": "1.1.0",
+  "description": "Tutorly — every course is written on the fly",
   "private": true,
   "author": "Oguzcan Karakoc",
-  "homepage": "https://github.com/OguzcanKarakoc/teach",
+  "homepage": "https://github.com/OguzcanKarakoc/tutorly",
   "repository": {
     "type": "git",
-    "url": "https://github.com/OguzcanKarakoc/teach.git"
+    "url": "https://github.com/OguzcanKarakoc/tutorly.git"
   },
   "main": "electron/main.cjs",
   "scripts": {
@@ -19,8 +19,8 @@
     "release": "npm run build && electron-builder --publish always"
   },
   "build": {
-    "appId": "com.oguzcankarakoc.teach",
-    "productName": "Teach",
+    "appId": "com.oguzcankarakoc.tutorly",
+    "productName": "Tutorly",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "files": [
       "dist/**/*",
@@ -37,7 +37,7 @@
     "publish": {
       "provider": "github",
       "owner": "OguzcanKarakoc",
-      "repo": "teach"
+      "repo": "tutorly"
     },
     "mac": {
       "target": [

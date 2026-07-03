@@ -812,11 +812,11 @@ export default class App extends React.Component {
       onConnect: this.onConnect, onDisconnect: this.onDisconnect,
       connectLabel: ag.connecting ? 'Connecting…' : (isCli ? 'Connect Claude Code' : isLocal ? 'Connect local model' : 'Connect'),
       connectBtnBg: ag.connecting ? '#cdcac4' : t.accent,
-      agentHint: ag.error ? ag.error : (connected ? ('Teach is generating with ' + modelLabel + '.') : 'Connect to start generating lessons.'),
+      agentHint: ag.error ? ag.error : (connected ? ('Tutorly is generating with ' + modelLabel + '.') : 'Connect to start generating lessons.'),
       agentHintColor: ag.error ? '#dc2626' : t.faint,
       agentCard: connected
         ? { title: providerName + ' · ' + modelLabel, subtitle: isCli ? 'Using your local Claude Code sign-in' : isLocal ? ag.baseUrl : (ag.hasApiKey ? 'Using your saved API key' : 'Using environment credentials'), border: '#a7f3d0', bg: '#ecfdf5', iconBg: '#16a34a', iconColor: '#fff' }
-        : { title: 'No agent connected', subtitle: 'Teach needs a model to write lessons.', border: t.border, bg: '#fff', iconBg: t.railHover, iconColor: t.sub },
+        : { title: 'No agent connected', subtitle: 'Tutorly needs a model to write lessons.', border: t.border, bg: '#fff', iconBg: t.railHover, iconColor: t.sub },
     };
 
     return {
@@ -858,7 +858,7 @@ export default class App extends React.Component {
         <div style={{ padding: '16px 14px 10px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 9, cursor: 'pointer' }} onClick={v.onHome}>
             <div style={{ width: 24, height: 24, borderRadius: 7, background: t.accent, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><span style={{ color: '#fff', fontSize: 14, fontWeight: 700 }}>T</span></div>
-            <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.02em' }}>Teach</span>
+            <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.02em' }}>Tutorly</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <H as="button" onClick={v.onNewCourse} title="New course" style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.sub, padding: 7, borderRadius: 8, display: 'flex' }} hover={t.railHoverCss}>
@@ -1229,7 +1229,7 @@ export default class App extends React.Component {
           <div style={{ position: 'sticky', top: 0, background: t.page, display: 'flex', alignItems: 'center', gap: 10, padding: '20px 22px 14px', borderBottom: `1px solid ${t.borderSoft}`, zIndex: 1 }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 17, fontWeight: 600, letterSpacing: '-0.01em', color: t.ink }}>Settings</div>
-              <div style={{ fontSize: '12.5px', color: t.faint, marginTop: 1 }}>Connect an agent so Teach can write your lessons.</div>
+              <div style={{ fontSize: '12.5px', color: t.faint, marginTop: 1 }}>Connect an agent so Tutorly can write your lessons.</div>
             </div>
             <H as="button" onClick={v.onCloseSettings} style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.faint, padding: 7, borderRadius: 9, display: 'flex' }} hover={t.railHoverCss}>
               <IcnX size={18} />
@@ -1268,7 +1268,7 @@ export default class App extends React.Component {
 
             {v.methodIsCli && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Teach talks to your local Claude Code and uses the account you're already signed in with — no API key needed. If you don't have it yet, install it and sign in once with <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>/login</span>. Connect runs a quick test message to confirm it works.</div>
+                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Tutorly talks to your local Claude Code and uses the account you're already signed in with — no API key needed. If you don't have it yet, install it and sign in once with <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>/login</span>. Connect runs a quick test message to confirm it works.</div>
                 <H as="button" onClick={v.onOpenDocs} style={{ alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 7, border: `1px solid ${t.border}`, background: '#fff', color: t.ink, borderRadius: 10, padding: '8px 13px', fontFamily: 'inherit', fontSize: 13, fontWeight: 500, cursor: 'pointer' }} hover={t.accentBorderCss}>
                   <Svg size={14}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></Svg>
                   Read the Claude Code install guide
@@ -1290,7 +1290,7 @@ export default class App extends React.Component {
 
             {v.methodIsLocal && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Point Teach at any OpenAI-compatible server running on your machine or network — <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>Ollama</span>, LM Studio, llama.cpp, and others. Teach reads the model list straight from the server. Nothing leaves your machine.</div>
+                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Point Tutorly at any OpenAI-compatible server running on your machine or network — <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>Ollama</span>, LM Studio, llama.cpp, and others. Tutorly reads the model list straight from the server. Nothing leaves your machine.</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: `1.5px solid ${t.border}`, borderRadius: 11, padding: '4px 4px 4px 14px' }}>
                   <span style={{ fontSize: '12.5px', color: t.faint, flexShrink: 0 }}>Server URL</span>
                   <input type="text" value={v.baseUrl} onChange={v.onBaseUrl} placeholder="http://localhost:11434/v1" spellCheck={false} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: "'Geist Mono', monospace", fontSize: 13, color: t.ink, padding: '8px 0' }} />
