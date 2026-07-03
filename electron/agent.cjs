@@ -20,19 +20,21 @@ let _claudeExe;
 function claudeExecutable() {
   if (_claudeExe !== undefined) return _claudeExe;
   _claudeExe = null;
-  try {
-    const pkg = `claude-agent-sdk-${process.platform}-${process.arch}`;
-    const bin = process.platform === 'win32' ? 'claude.exe' : 'claude';
-    const sdkDir = path.dirname(require.resolve('@anthropic-ai/claude-agent-sdk/package.json'));
-    const candidates = [
-      path.join(sdkDir, 'node_modules', '@anthropic-ai', pkg, bin), // packaged (nested)
-      path.join(sdkDir, '..', pkg, bin),                            // hoisted (dev)
-    ];
-    for (let c of candidates) {
-      if (c.includes(`app.asar${path.sep}`)) c = c.replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`);
-      if (fs.existsSync(c)) { _claudeExe = c; break; }
-    }
-  } catch (e) { /* leave null — SDK falls back to its own resolution */ }
+  // Resolve via __dirname, NOT require.resolve: the SDK's package.json has an
+  // "exports" map without "./package.json", so require.resolve of it throws
+  // (ERR_PACKAGE_PATH_NOT_EXPORTED). node_modules sits one level up from
+  // electron/ both in dev and inside app.asar.
+  const pkg = `claude-agent-sdk-${process.platform}-${process.arch}`;
+  const bin = process.platform === 'win32' ? 'claude.exe' : 'claude';
+  const nm = path.join(__dirname, '..', 'node_modules', '@anthropic-ai');
+  const candidates = [
+    path.join(nm, 'claude-agent-sdk', 'node_modules', '@anthropic-ai', pkg, bin), // packaged (nested)
+    path.join(nm, pkg, bin),                                                        // hoisted (dev)
+  ];
+  for (let c of candidates) {
+    if (c.includes(`app.asar${path.sep}`)) c = c.replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`);
+    try { if (fs.existsSync(c)) { _claudeExe = c; break; } } catch (e) {}
+  }
   return _claudeExe;
 }
 
