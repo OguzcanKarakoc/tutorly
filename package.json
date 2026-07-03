@@ -1,7 +1,7 @@
 {
   "name": "teach",
   "productName": "Teach",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Teach — every course is written on the fly",
   "private": true,
   "author": "Oguzcan Karakoc",
@@ -52,7 +52,12 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -62,7 +67,12 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "category": "Education"
     }
