@@ -10,4 +10,20 @@ contextBridge.exposeInMainWorld('teach', {
   startCourse: (payload) => ipcRenderer.invoke('teach:start', payload),
   nextLesson: (payload) => ipcRenderer.invoke('teach:next', payload),
   askThread: (payload) => ipcRenderer.invoke('teach:thread', payload),
+  getLogs: () => ipcRenderer.invoke('log:history'),
+  clearLogs: () => ipcRenderer.invoke('log:clear'),
+  onLog: (cb) => {
+    const h = (_e, entry) => cb(entry);
+    ipcRenderer.on('agent:log', h);
+    return () => ipcRenderer.removeListener('agent:log', h);
+  },
+  getVersion: () => ipcRenderer.invoke('app:version'),
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  onUpdate: (cb) => {
+    const h = (_e, payload) => cb(payload);
+    ipcRenderer.on('update:status', h);
+    return () => ipcRenderer.removeListener('update:status', h);
+  },
 });

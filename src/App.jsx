@@ -22,6 +22,7 @@ const GEAR_PATH = 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l
 
 export default class App extends React.Component {
   _proseRef = React.createRef();
+  _logRef = React.createRef();
 
   state = {
     landingInput: '',
@@ -50,6 +51,11 @@ export default class App extends React.Component {
     courses: [],
     genErrors: {},
     regenId: null,
+    debugOpen: false,
+    logs: [],
+    appVersion: '',
+    update: { type: 'idle' },
+    updateDismissed: false,
   };
 
   placeholders = ['Learn React from scratch…', 'Explain quantum computing…', 'Teach me accounting…', 'Learn Docker…', 'Understand machine learning…'];
@@ -70,6 +76,21 @@ export default class App extends React.Component {
         }));
       }).catch(() => {});
     }
+    if (api && api.onLog) {
+      api.getLogs().then(list => this.setState({ logs: (list || []).slice(-800) })).catch(() => {});
+      this._offLog = api.onLog(entry => this.setState(s => ({ logs: [...s.logs, entry].slice(-800) })));
+    }
+    if (api && api.getVersion) api.getVersion().then(v => this.setState({ appVersion: v })).catch(() => {});
+    if (api && api.onUpdate) {
+      this._offUpdate = api.onUpdate(payload => this.setState(s => ({
+        update: payload,
+        updateDismissed: (payload.type === 'available' || payload.type === 'downloaded') ? false : s.updateDismissed,
+      })));
+    }
+    this._onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === '`' || e.key === '~')) { e.preventDefault(); this.toggleDebug(); }
+    };
+    window.addEventListener('keydown', this._onKey);
   }
 
   persist() {
@@ -88,6 +109,9 @@ export default class App extends React.Component {
     if (sig !== this._hlSig) { this._hlSig = sig; this.scheduleHL(); }
     const s = this.state;
     if (s.courses !== ps.courses || s.completed !== ps.completed || s.threads !== ps.threads || s.quiz !== ps.quiz) this.persist();
+    if (s.debugOpen && this._logRef.current && (s.logs !== ps.logs || !ps.debugOpen)) {
+      const el = this._logRef.current; el.scrollTop = el.scrollHeight;
+    }
   }
 
   applyHLVars() {
@@ -229,7 +253,7 @@ export default class App extends React.Component {
     else if (ids.length > 1) this.setState({ picker: { top: e.clientY + 10, left: Math.min(e.clientX, window.innerWidth - 230), ids } });
   };
   onClosePicker = () => this.setState({ picker: null });
-  componentWillUnmount() { clearInterval(this._ph); window.removeEventListener('resize', this._rs); clearTimeout(this._save); }
+  componentWillUnmount() { clearInterval(this._ph); window.removeEventListener('resize', this._rs); clearTimeout(this._save); if (this._offLog) this._offLog(); if (this._offUpdate) this._offUpdate(); if (this._onKey) window.removeEventListener('keydown', this._onKey); }
 
   // ---------- theme ----------
 
@@ -406,6 +430,81 @@ export default class App extends React.Component {
     if (q.qi < total - 1) this.setState(s => ({ quiz: { ...s.quiz, [id]: { qi: q.qi + 1, selected: null, revealed: false } } }));
     else { this.setState(s => ({ completed: { ...s.completed, [id]: true } })); this.onCloseViewer(); }
   };
+  resetQuiz = (id) => this.setState(s => ({ quiz: { ...s.quiz, [id]: { qi: 0, selected: null, revealed: false } }, completed: { ...s.completed, [id]: false } }));
+
+  // Remove a lesson and every lesson after it — an "undo to this point" for a
+  // course that went the wrong way. Drops the removed lessons' progress, quiz
+  // state and threads too.
+  deleteLessonFrom = (courseId, lessonId) => {
+    const course = this.courses.find(c => c.id === courseId);
+    if (!course) return;
+    const lessons = course.lessons || [];
+    const idx = lessons.findIndex(l => l.id === lessonId);
+    if (idx < 0) return;
+    const removed = lessons.slice(idx);
+    const after = removed.length - 1;
+    const msg = after > 0
+      ? `Delete “${lessons[idx].title}” and the ${after} lesson${after === 1 ? '' : 's'} after it? This can’t be undone.`
+      : `Delete “${lessons[idx].title}”? This can’t be undone.`;
+    if (typeof window !== 'undefined' && window.confirm && !window.confirm(msg)) return;
+    const removedIds = removed.map(l => l.id);
+    this.setState(s => {
+      const courses = s.courses.map(c => c.id === courseId ? { ...c, lessons: lessons.slice(0, idx) } : c);
+      const completed = { ...s.completed }, quiz = { ...s.quiz }, threads = { ...s.threads };
+      removedIds.forEach(id => { delete completed[id]; delete quiz[id]; delete threads[id]; });
+      const openLessonId = removedIds.includes(s.openLessonId) ? null : s.openLessonId;
+      return { courses, completed, quiz, threads, openLessonId };
+    });
+  };
+
+  // Delete an entire course and all of its lessons' progress, quiz and thread
+  // state. Clears the open lesson / active course if they belonged to it.
+  deleteCourse = (courseId) => {
+    const course = this.courses.find(c => c.id === courseId);
+    if (!course) return;
+    const n = (course.lessons || []).length;
+    const msg = `Delete “${course.title}”${n ? ` and its ${n} lesson${n === 1 ? '' : 's'}` : ''}? This can’t be undone.`;
+    if (typeof window !== 'undefined' && window.confirm && !window.confirm(msg)) return;
+    const removedIds = (course.lessons || []).map(l => l.id);
+    this.setState(s => {
+      const courses = s.courses.filter(c => c.id !== courseId);
+      const completed = { ...s.completed }, quiz = { ...s.quiz }, threads = { ...s.threads }, collapsed = { ...s.collapsed };
+      removedIds.forEach(id => { delete completed[id]; delete quiz[id]; delete threads[id]; });
+      delete collapsed[courseId];
+      const wasActive = s.activeId === courseId;
+      return {
+        courses, completed, quiz, threads, collapsed,
+        activeId: wasActive ? null : s.activeId,
+        openLessonId: wasActive ? null : s.openLessonId,
+      };
+    });
+  };
+
+  // ---------- debug console ----------
+
+  toggleDebug = () => this.setState(s => ({ debugOpen: !s.debugOpen }));
+  clearLogs = () => { if (api) api.clearLogs().catch(() => {}); this.setState({ logs: [] }); };
+  fmtLogTime(ms) {
+    const d = new Date(ms), p = (n, l = 2) => String(n).padStart(l, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + '.' + p(d.getMilliseconds(), 3);
+  }
+  logColor(e) {
+    if (e.level === 'error') return '#fca5a5';
+    const tag = e.tag || '';
+    if (tag.indexOf('cli') === 0) return '#7dd3fc';
+    if (tag.indexOf('api') === 0) return '#c4b5fd';
+    if (tag === 'course' || tag === 'lesson' || tag === 'thread') return '#6ee7b7';
+    if (tag === 'connect') return '#fcd34d';
+    return '#9ca3af';
+  }
+  msgColor(e) { return e.level === 'error' ? '#fca5a5' : (e.level === 'debug' ? '#9aa0aa' : '#e6e8ec'); }
+
+  // ---------- updates ----------
+
+  checkUpdate = () => { if (api) api.checkUpdate().catch(() => {}); };
+  downloadUpdate = () => { if (api) api.downloadUpdate().catch(() => {}); };
+  installUpdate = () => { if (api) api.installUpdate().catch(() => {}); };
+  dismissUpdate = () => this.setState({ updateDismissed: true });
 
   // ---------- settings ----------
 
@@ -469,6 +568,7 @@ export default class App extends React.Component {
           : (gl.length === 0 ? 'No lessons yet — type below to start' : gl.length + ' lesson' + (gl.length === 1 ? '' : 's') + ' · ask for more'),
         onSelect: () => this.selectCourse(c.id),
         onToggle: (e) => { e.stopPropagation(); this.toggleCourse(c.id); },
+        onDelete: (e) => { e.stopPropagation(); this.deleteCourse(c.id); },
         rowStyle: { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 9px', borderRadius: '10px', cursor: 'pointer', transition: 'background 0.15s', background: isActive ? '#fff' : 'transparent', boxShadow: isActive ? '0 1px 3px rgba(0,0,0,0.06)' : 'none' },
         chevStyle: { display: 'inline-flex', transition: 'transform 0.2s', transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)' },
         lessons: gl.map((l, i) => {
@@ -477,6 +577,7 @@ export default class App extends React.Component {
           return {
             id: l.id, title: (i + 1) + '. ' + l.title, dot: done ? '✓' : '',
             onOpen: () => { this.setState({ activeId: c.id }); this.openLesson(l.id); },
+            onDelete: (e) => { e.stopPropagation(); this.deleteLessonFrom(c.id, l.id); },
             rowStyle: { display: 'flex', alignItems: 'center', gap: '9px', padding: '6px 9px', borderRadius: '8px', cursor: 'pointer', fontSize: '12.5px', fontWeight: cur ? 600 : 400, color: cur ? t.ink : t.sub, background: cur ? t.railHover : 'transparent', marginBottom: '1px', transition: 'background 0.15s' },
             dotStyle: { width: '15px', height: '15px', borderRadius: '999px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '9px', fontWeight: 700, background: done ? t.accent : 'transparent', color: done ? '#fff' : 'transparent', border: done ? 'none' : '1.5px solid ' + t.border },
           };
@@ -552,6 +653,8 @@ export default class App extends React.Component {
         hasQuiz,
         quiz: hasQuiz ? {
           progress: 'Question ' + (qs.qi + 1) + ' of ' + questions.length, question: curQ.q, revealed: qs.revealed,
+          canReset: qs.qi > 0 || qs.revealed || done,
+          onReset: () => this.resetQuiz(openL.id),
           options: curQ.options.map((opt, oi) => {
             const chosen = qs.selected === oi, isCorrect = oi === curQ.correct;
             let bg = '#fff', bd = t.border, mk = String.fromCharCode(65 + oi), mkBg = t.railHover, mkFg = t.sub;
@@ -688,6 +791,9 @@ export default class App extends React.Component {
     return {
       t,
       showApp: true,
+      debugOpen: s.debugOpen, logs: s.logs, onToggleDebug: this.toggleDebug, onClearDebug: this.clearLogs,
+      appVersion: s.appVersion, update: s.update, updateDismissed: s.updateDismissed,
+      onCheckUpdate: this.checkUpdate, onDownloadUpdate: this.downloadUpdate, onInstallUpdate: this.installUpdate, onDismissUpdate: this.dismissUpdate,
       landingInput: s.landingInput, placeholder: this.placeholders[s.phIndex], inputBorder: s.focused ? t.accent : t.border,
       onLandingInput: this.onLandingInput, onLandingKey: this.onLandingKey, onFocus: this.onFocus, onBlur: this.onBlur, onStart: this.onStart, examples,
       sidebarVisible: mobile ? s.mobileNav : true,
@@ -751,6 +857,9 @@ export default class App extends React.Component {
                   <span style={c.chevStyle}><Svg size={12} sw={2.4}><path d="m9 18 6-6-6-6" /></Svg></span>
                 </button>
                 <span style={{ flex: 1, minWidth: 0, fontSize: '13.5px', fontWeight: 500, color: t.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.title}</span>
+                <H as="button" onClick={c.onDelete} title="Delete this course" style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.faint, padding: 2, display: 'flex', flexShrink: 0, borderRadius: 6 }} hover={'color: #dc2626;'}>
+                  <IcnTrash size={13} />
+                </H>
               </H>
               {c.expanded && (
                 <div style={{ margin: '2px 0 4px 15px', paddingLeft: 13, borderLeft: `1.5px solid ${t.border}`, animation: 'tuiExpand 0.2s ease' }}>
@@ -758,6 +867,9 @@ export default class App extends React.Component {
                     <H key={l.id} onClick={l.onOpen} style={l.rowStyle} hover={t.railHoverCss}>
                       <span style={l.dotStyle}>{l.dot}</span>
                       <span style={{ flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.title}</span>
+                      <H as="button" onClick={l.onDelete} title="Delete this lesson and everything after it" style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.faint, padding: 2, display: 'flex', flexShrink: 0, borderRadius: 6 }} hover={'color: #dc2626;'}>
+                        <IcnTrash size={13} />
+                      </H>
                     </H>
                   ))}
                   <div style={{ fontSize: '11.5px', color: t.faint, padding: '5px 9px 3px' }}>{c.moreLabel}</div>
@@ -768,6 +880,11 @@ export default class App extends React.Component {
         </div>
 
         <div style={{ borderTop: `1px solid ${t.border}`, padding: '8px 10px' }}>
+          <H onClick={v.onToggleDebug} title="Agent activity console (⌘`)" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 10, cursor: 'pointer' }} hover={t.railHoverCss}>
+            <Svg size={16} stroke={v.debugOpen ? t.accent : t.sub} style={{ flexShrink: 0 }}><path d="M4 17l6-6-6-6" /><path d="M12 19h8" /></Svg>
+            <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: v.debugOpen ? t.accent : t.ink }}>Debug console</div>
+            <span style={{ fontSize: '11px', color: t.faint }}>⌘`</span>
+          </H>
           <H onClick={v.onOpenSettings} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 10, cursor: 'pointer' }} hover={t.railHoverCss}>
             <Svg size={17} stroke={t.sub} style={{ flexShrink: 0 }}><circle cx="12" cy="12" r="3" /><path d={GEAR_PATH} /></Svg>
             <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: t.ink }}>Settings</div>
@@ -775,6 +892,10 @@ export default class App extends React.Component {
               <span style={{ width: 6, height: 6, borderRadius: 999, background: v.agentPill.dot }} />{v.agentPill.label}
             </span>
           </H>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 12px 2px' }}>
+            <span style={{ fontSize: '11px', color: t.faint }}>v{v.appVersion || '…'}</span>
+            <button onClick={v.onCheckUpdate} style={{ border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: '11px', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>Check for updates</button>
+          </div>
         </div>
       </aside>
     );
@@ -938,7 +1059,14 @@ export default class App extends React.Component {
 
               {v.hasQuiz && (
                 <div style={{ marginTop: 34, background: t.quizBg, border: `1px solid ${t.quizBorder}`, borderRadius: 18, padding: '24px 26px' }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.accent, marginBottom: 10 }}>Quick check · {v.quiz.progress}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                    <div style={{ flex: 1, fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.accent }}>Quick check · {v.quiz.progress}</div>
+                    {v.quiz.canReset && (
+                      <H as="button" onClick={v.quiz.onReset} title="Start this quiz over" style={{ border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: 12, fontWeight: 500, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 4px', borderRadius: 7 }} hover={'color: ' + t.accent + ';'}>
+                        <Svg size={13}><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" /><path d="M3 21v-5h5" /></Svg>Reset quiz
+                      </H>
+                    )}
+                  </div>
                   <div style={{ fontSize: 19, fontWeight: 600, letterSpacing: '-0.01em', margin: '0 0 18px', color: t.ink, lineHeight: 1.4 }}>{v.quiz.question}</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                     {v.quiz.options.map((o, i) => (
@@ -1149,6 +1277,86 @@ export default class App extends React.Component {
     );
   }
 
+  renderDebug(v) {
+    const logs = v.logs;
+    return (
+      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: '42%', minHeight: 220, zIndex: 90, display: 'flex', flexDirection: 'column', background: '#0f1115', borderTop: '1px solid #23262d', boxShadow: '0 -14px 44px -14px rgba(0,0,0,0.55)', animation: 'tuiSlideUp 0.22s cubic-bezier(0.22,1,0.36,1)', fontFamily: "'Geist Mono', ui-monospace, monospace" }}>
+        <div style={{ flexShrink: 0, height: 38, display: 'flex', alignItems: 'center', gap: 10, padding: '0 12px', borderBottom: '1px solid #23262d' }}>
+          <span style={{ width: 8, height: 8, borderRadius: 999, background: logs.length ? '#34d399' : '#4b5563', flexShrink: 0 }} />
+          <span style={{ fontSize: 12, fontWeight: 600, color: '#e6e8ec', letterSpacing: '0.02em' }}>Agent activity</span>
+          <span style={{ fontSize: 11, color: '#6b7280' }}>{logs.length} event{logs.length === 1 ? '' : 's'}</span>
+          <div style={{ flex: 1 }} />
+          <H as="button" onClick={v.onClearDebug} style={{ border: '1px solid #2b2f37', background: 'transparent', color: '#9ca3af', borderRadius: 7, padding: '4px 10px', fontFamily: 'inherit', fontSize: '11.5px', cursor: 'pointer' }} hover={'border-color: #3f444d; color: #e6e8ec;'}>Clear</H>
+          <button onClick={v.onToggleDebug} title="Close (⌘`)" style={{ border: 'none', background: 'transparent', color: '#9ca3af', cursor: 'pointer', display: 'flex', padding: 4 }}><IcnX size={16} /></button>
+        </div>
+        <div ref={this._logRef} className="tui-scroll" style={{ flex: 1, overflowY: 'auto', padding: '8px 12px', fontSize: '12px', lineHeight: 1.65 }}>
+          {logs.length === 0 && (
+            <div style={{ color: '#6b7280', padding: '6px 0' }}>No activity yet. Start a course or ask a question — the agent’s steps stream here live.</div>
+          )}
+          {logs.map(e => (
+            <div key={e.id} style={{ display: 'flex', gap: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-word', padding: '1px 0' }}>
+              <span style={{ color: '#4b5563', flexShrink: 0 }}>{this.fmtLogTime(e.time)}</span>
+              <span style={{ color: this.logColor(e), flexShrink: 0, minWidth: 62 }}>{e.tag}</span>
+              <span style={{ color: this.msgColor(e), flex: 1 }}>{e.msg}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  renderUpdate(v) {
+    const t = v.t, u = v.update || {};
+    const show = u.type === 'progress' || (!v.updateDismissed && (u.type === 'available' || u.type === 'downloaded'));
+    if (!show) return null;
+    const card = { position: 'fixed', right: 20, bottom: v.debugOpen ? 'calc(42% + 16px)' : 20, zIndex: 95, width: 320, maxWidth: 'calc(100vw - 40px)', background: '#fff', border: `1px solid ${t.border}`, borderRadius: 14, boxShadow: '0 18px 50px -16px rgba(28,27,25,0.4)', padding: '16px 18px', animation: 'tuiFadeUp 0.3s cubic-bezier(0.22,1,0.36,1)' };
+    const primaryBtn = { border: 'none', background: t.accent, color: '#fff', fontFamily: 'inherit', fontWeight: 500, fontSize: 13, padding: '8px 14px', borderRadius: 10, cursor: 'pointer' };
+    const ghostBtn = { border: `1px solid ${t.border}`, background: '#fff', color: t.sub, fontFamily: 'inherit', fontWeight: 500, fontSize: 13, padding: '8px 12px', borderRadius: 10, cursor: 'pointer' };
+    let title, body, actions;
+    if (u.type === 'available') {
+      title = 'Update available';
+      body = `Version ${u.version} is ready to download.`;
+      actions = (
+        <>
+          <button onClick={v.onDownloadUpdate} style={primaryBtn}>Download</button>
+          <button onClick={v.onDismissUpdate} style={ghostBtn}>Later</button>
+        </>
+      );
+    } else if (u.type === 'progress') {
+      title = 'Downloading update…';
+      body = (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ height: 6, borderRadius: 999, background: t.railHover, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: (u.percent || 0) + '%', background: t.accent, transition: 'width 0.2s' }} />
+          </div>
+          <div style={{ fontSize: 11.5, color: t.faint, marginTop: 6 }}>{u.percent || 0}%</div>
+        </div>
+      );
+      actions = null;
+    } else {
+      title = 'Update ready';
+      body = `Version ${u.version} downloaded. Restart to install.`;
+      actions = (
+        <>
+          <button onClick={v.onInstallUpdate} style={primaryBtn}>Restart & update</button>
+          <button onClick={v.onDismissUpdate} style={ghostBtn}>Later</button>
+        </>
+      );
+    }
+    return (
+      <div style={card}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 8 }}>
+          <span style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: t.accent + '18', color: t.accent }}>
+            <Svg size={14}><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></Svg>
+          </span>
+          <span style={{ fontSize: 14, fontWeight: 600, color: t.ink }}>{title}</span>
+        </div>
+        <div style={{ fontSize: 13, color: t.body, lineHeight: 1.5 }}>{body}</div>
+        {actions && <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>{actions}</div>}
+      </div>
+    );
+  }
+
   render() {
     const v = this.renderVals();
     const t = v.t;
@@ -1185,6 +1393,8 @@ export default class App extends React.Component {
         )}
 
         {v.settingsOpen && this.renderSettings(v)}
+        {v.debugOpen && this.renderDebug(v)}
+        {this.renderUpdate(v)}
       </div>
     );
   }

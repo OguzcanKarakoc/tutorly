@@ -4,6 +4,9 @@ node_modules/
 # Build output
 dist/
 
+# Packaged installers (electron-builder)
+release/
+
 # Logs
 npm-debug.log*
 *.log
