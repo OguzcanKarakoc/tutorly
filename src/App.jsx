@@ -22,6 +22,7 @@ const GEAR_PATH = 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l
 
 export default class App extends React.Component {
   _proseRef = React.createRef();
+  _logRef = React.createRef();
 
   state = {
     landingInput: '',
@@ -41,7 +42,7 @@ export default class App extends React.Component {
     askBtn: null,
     picker: null,
     settingsOpen: false,
-    agent: { method: 'cli', connected: false, hasApiKey: false, apiKey: '', model: 'claude-opus-4-8', connecting: false, error: '' },
+    agent: { method: 'cli', connected: false, hasApiKey: false, apiKey: '', model: 'claude-opus-4-8', baseUrl: 'http://localhost:11434/v1', connecting: false, error: '', models: [], modelsLoading: false, modelsError: '' },
     mobileNav: false,
     vw: (typeof window !== 'undefined' ? window.innerWidth : 1280),
     collapsed: {},
@@ -50,6 +51,11 @@ export default class App extends React.Component {
     courses: [],
     genErrors: {},
     regenId: null,
+    debugOpen: false,
+    logs: [],
+    appVersion: '',
+    update: { type: 'idle' },
+    updateDismissed: false,
   };
 
   placeholders = ['Learn React from scratch…', 'Explain quantum computing…', 'Teach me accounting…', 'Learn Docker…', 'Understand machine learning…'];
@@ -66,10 +72,26 @@ export default class App extends React.Component {
           completed: (data && data.completed) || {},
           threads: (data && data.threads) || {},
           quiz: (data && data.quiz) || {},
-          agent: { ...s.agent, method: settings.method || s.agent.method, model: settings.model || s.agent.model, connected: !!settings.connected, hasApiKey: !!settings.hasApiKey },
+          agent: { ...s.agent, method: settings.method || s.agent.method, model: settings.model || s.agent.model, connected: !!settings.connected, hasApiKey: !!settings.hasApiKey, baseUrl: settings.baseUrl || s.agent.baseUrl },
         }));
+        this.refreshModels();
       }).catch(() => {});
     }
+    if (api && api.onLog) {
+      api.getLogs().then(list => this.setState({ logs: (list || []).slice(-800) })).catch(() => {});
+      this._offLog = api.onLog(entry => this.setState(s => ({ logs: [...s.logs, entry].slice(-800) })));
+    }
+    if (api && api.getVersion) api.getVersion().then(v => this.setState({ appVersion: v })).catch(() => {});
+    if (api && api.onUpdate) {
+      this._offUpdate = api.onUpdate(payload => this.setState(s => ({
+        update: payload,
+        updateDismissed: (payload.type === 'available' || payload.type === 'downloaded') ? false : s.updateDismissed,
+      })));
+    }
+    this._onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === '`' || e.key === '~')) { e.preventDefault(); this.toggleDebug(); }
+    };
+    window.addEventListener('keydown', this._onKey);
   }
 
   persist() {
@@ -88,6 +110,9 @@ export default class App extends React.Component {
     if (sig !== this._hlSig) { this._hlSig = sig; this.scheduleHL(); }
     const s = this.state;
     if (s.courses !== ps.courses || s.completed !== ps.completed || s.threads !== ps.threads || s.quiz !== ps.quiz) this.persist();
+    if (s.debugOpen && this._logRef.current && (s.logs !== ps.logs || !ps.debugOpen)) {
+      const el = this._logRef.current; el.scrollTop = el.scrollHeight;
+    }
   }
 
   applyHLVars() {
@@ -229,7 +254,7 @@ export default class App extends React.Component {
     else if (ids.length > 1) this.setState({ picker: { top: e.clientY + 10, left: Math.min(e.clientX, window.innerWidth - 230), ids } });
   };
   onClosePicker = () => this.setState({ picker: null });
-  componentWillUnmount() { clearInterval(this._ph); window.removeEventListener('resize', this._rs); clearTimeout(this._save); }
+  componentWillUnmount() { clearInterval(this._ph); window.removeEventListener('resize', this._rs); clearTimeout(this._save); if (this._offLog) this._offLog(); if (this._offUpdate) this._offUpdate(); if (this._onKey) window.removeEventListener('keydown', this._onKey); }
 
   // ---------- theme ----------
 
@@ -406,22 +431,118 @@ export default class App extends React.Component {
     if (q.qi < total - 1) this.setState(s => ({ quiz: { ...s.quiz, [id]: { qi: q.qi + 1, selected: null, revealed: false } } }));
     else { this.setState(s => ({ completed: { ...s.completed, [id]: true } })); this.onCloseViewer(); }
   };
+  resetQuiz = (id) => this.setState(s => ({ quiz: { ...s.quiz, [id]: { qi: 0, selected: null, revealed: false } }, completed: { ...s.completed, [id]: false } }));
+
+  // Remove a lesson and every lesson after it — an "undo to this point" for a
+  // course that went the wrong way. Drops the removed lessons' progress, quiz
+  // state and threads too.
+  deleteLessonFrom = (courseId, lessonId) => {
+    const course = this.courses.find(c => c.id === courseId);
+    if (!course) return;
+    const lessons = course.lessons || [];
+    const idx = lessons.findIndex(l => l.id === lessonId);
+    if (idx < 0) return;
+    const removed = lessons.slice(idx);
+    const after = removed.length - 1;
+    const msg = after > 0
+      ? `Delete “${lessons[idx].title}” and the ${after} lesson${after === 1 ? '' : 's'} after it? This can’t be undone.`
+      : `Delete “${lessons[idx].title}”? This can’t be undone.`;
+    if (typeof window !== 'undefined' && window.confirm && !window.confirm(msg)) return;
+    const removedIds = removed.map(l => l.id);
+    this.setState(s => {
+      const courses = s.courses.map(c => c.id === courseId ? { ...c, lessons: lessons.slice(0, idx) } : c);
+      const completed = { ...s.completed }, quiz = { ...s.quiz }, threads = { ...s.threads };
+      removedIds.forEach(id => { delete completed[id]; delete quiz[id]; delete threads[id]; });
+      const openLessonId = removedIds.includes(s.openLessonId) ? null : s.openLessonId;
+      return { courses, completed, quiz, threads, openLessonId };
+    });
+  };
+
+  // Delete an entire course and all of its lessons' progress, quiz and thread
+  // state. Clears the open lesson / active course if they belonged to it.
+  deleteCourse = (courseId) => {
+    const course = this.courses.find(c => c.id === courseId);
+    if (!course) return;
+    const n = (course.lessons || []).length;
+    const msg = `Delete “${course.title}”${n ? ` and its ${n} lesson${n === 1 ? '' : 's'}` : ''}? This can’t be undone.`;
+    if (typeof window !== 'undefined' && window.confirm && !window.confirm(msg)) return;
+    const removedIds = (course.lessons || []).map(l => l.id);
+    this.setState(s => {
+      const courses = s.courses.filter(c => c.id !== courseId);
+      const completed = { ...s.completed }, quiz = { ...s.quiz }, threads = { ...s.threads }, collapsed = { ...s.collapsed };
+      removedIds.forEach(id => { delete completed[id]; delete quiz[id]; delete threads[id]; });
+      delete collapsed[courseId];
+      const wasActive = s.activeId === courseId;
+      return {
+        courses, completed, quiz, threads, collapsed,
+        activeId: wasActive ? null : s.activeId,
+        openLessonId: wasActive ? null : s.openLessonId,
+      };
+    });
+  };
+
+  // ---------- debug console ----------
+
+  toggleDebug = () => this.setState(s => ({ debugOpen: !s.debugOpen }));
+  clearLogs = () => { if (api) api.clearLogs().catch(() => {}); this.setState({ logs: [] }); };
+  fmtLogTime(ms) {
+    const d = new Date(ms), p = (n, l = 2) => String(n).padStart(l, '0');
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) + '.' + p(d.getMilliseconds(), 3);
+  }
+  logColor(e) {
+    if (e.level === 'error') return '#fca5a5';
+    const tag = e.tag || '';
+    if (tag.indexOf('cli') === 0) return '#7dd3fc';
+    if (tag.indexOf('api') === 0) return '#c4b5fd';
+    if (tag === 'course' || tag === 'lesson' || tag === 'thread') return '#6ee7b7';
+    if (tag === 'connect') return '#fcd34d';
+    return '#9ca3af';
+  }
+  msgColor(e) { return e.level === 'error' ? '#fca5a5' : (e.level === 'debug' ? '#9aa0aa' : '#e6e8ec'); }
+
+  // ---------- updates ----------
+
+  checkUpdate = () => { if (api) api.checkUpdate().catch(() => {}); };
+  downloadUpdate = () => { if (api) api.downloadUpdate().catch(() => {}); };
+  installUpdate = () => { if (api) api.installUpdate().catch(() => {}); };
+  dismissUpdate = () => this.setState({ updateDismissed: true });
 
   // ---------- settings ----------
 
-  onOpenSettings = () => this.setState({ settingsOpen: true, mobileNav: false });
+  onOpenSettings = () => { this.setState({ settingsOpen: true, mobileNav: false }); this.refreshModels(); };
   onCloseSettings = () => this.setState({ settingsOpen: false });
   setAgent = (patch) => this.setState(s => ({ agent: { ...s.agent, ...patch } }));
   onApiKey = (e) => this.setAgent({ apiKey: e.target.value });
-  onAgentMethod = (m) => { this.setAgent({ method: m, connected: false, error: '' }); if (api) api.setMethod(m).catch(() => {}); };
+  onBaseUrl = (e) => this.setAgent({ baseUrl: e.target.value });
+  onAgentMethod = (m) => { this.setAgent({ method: m, connected: false, error: '', models: [], modelsError: '' }); if (api) api.setMethod(m).then(() => this.refreshModels()).catch(() => {}); };
   onModel = (m) => { this.setAgent({ model: m }); if (api) api.setModel(m).catch(() => {}); };
-  onCopyCmd = () => { try { navigator.clipboard.writeText('npm install -g @anthropic-ai/claude-code && claude'); } catch (e) {} };
+  openDocs = (url) => { if (api && api.openExternal) api.openExternal(url); else if (typeof window !== 'undefined') window.open(url, '_blank'); };
+
+  // Ask the backend which models are actually available for the current
+  // provider (live for Local/API, static list for Claude Code).
+  refreshModels = () => {
+    if (!api || !api.listModels) return;
+    const method = this.state.agent.method;
+    this.setAgent({ modelsLoading: true, modelsError: '' });
+    const prep = (method === 'local' && api.setBaseUrl) ? api.setBaseUrl(this.state.agent.baseUrl) : Promise.resolve();
+    prep.catch(() => {}).then(() => api.listModels()).then(res => {
+      if (this.state.agent.method !== method) return; // provider changed while loading
+      if (res && res.ok) {
+        const models = res.models || [];
+        this.setAgent({ models, modelsLoading: false, modelsError: models.length ? '' : 'No models found.' });
+        if (models.length && !models.find(m => m.id === this.state.agent.model)) this.onModel(models[0].id);
+      } else {
+        this.setAgent({ models: [], modelsLoading: false, modelsError: (res && res.error) || 'Couldn’t list models.' });
+      }
+    }).catch(() => this.setAgent({ models: [], modelsLoading: false, modelsError: 'Couldn’t list models.' }));
+  };
+
   onConnect = () => {
     const a = this.state.agent;
     if (a.connecting) return;
     this.setAgent({ connecting: true, error: '' });
-    (api ? api.connect({ method: a.method, apiKey: a.apiKey || undefined, model: a.model }) : Promise.resolve({ ok: false, error: 'Agent bridge unavailable.' })).then(res => {
-      if (res.ok) this.setAgent({ connected: true, connecting: false, hasApiKey: this.state.agent.apiKey ? true : this.state.agent.hasApiKey, apiKey: '', error: '' });
+    (api ? api.connect({ method: a.method, apiKey: a.apiKey || undefined, model: a.model, baseUrl: a.baseUrl }) : Promise.resolve({ ok: false, error: 'Agent bridge unavailable.' })).then(res => {
+      if (res.ok) { this.setAgent({ connected: true, connecting: false, hasApiKey: this.state.agent.apiKey ? true : this.state.agent.hasApiKey, apiKey: '', error: '', model: res.model || this.state.agent.model }); this.refreshModels(); }
       else this.setAgent({ connected: false, connecting: false, error: res.error });
     });
   };
@@ -469,6 +590,7 @@ export default class App extends React.Component {
           : (gl.length === 0 ? 'No lessons yet — type below to start' : gl.length + ' lesson' + (gl.length === 1 ? '' : 's') + ' · ask for more'),
         onSelect: () => this.selectCourse(c.id),
         onToggle: (e) => { e.stopPropagation(); this.toggleCourse(c.id); },
+        onDelete: (e) => { e.stopPropagation(); this.deleteCourse(c.id); },
         rowStyle: { display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 9px', borderRadius: '10px', cursor: 'pointer', transition: 'background 0.15s', background: isActive ? '#fff' : 'transparent', boxShadow: isActive ? '0 1px 3px rgba(0,0,0,0.06)' : 'none' },
         chevStyle: { display: 'inline-flex', transition: 'transform 0.2s', transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)' },
         lessons: gl.map((l, i) => {
@@ -477,6 +599,7 @@ export default class App extends React.Component {
           return {
             id: l.id, title: (i + 1) + '. ' + l.title, dot: done ? '✓' : '',
             onOpen: () => { this.setState({ activeId: c.id }); this.openLesson(l.id); },
+            onDelete: (e) => { e.stopPropagation(); this.deleteLessonFrom(c.id, l.id); },
             rowStyle: { display: 'flex', alignItems: 'center', gap: '9px', padding: '6px 9px', borderRadius: '8px', cursor: 'pointer', fontSize: '12.5px', fontWeight: cur ? 600 : 400, color: cur ? t.ink : t.sub, background: cur ? t.railHover : 'transparent', marginBottom: '1px', transition: 'background 0.15s' },
             dotStyle: { width: '15px', height: '15px', borderRadius: '999px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '9px', fontWeight: 700, background: done ? t.accent : 'transparent', color: done ? '#fff' : 'transparent', border: done ? 'none' : '1.5px solid ' + t.border },
           };
@@ -552,6 +675,8 @@ export default class App extends React.Component {
         hasQuiz,
         quiz: hasQuiz ? {
           progress: 'Question ' + (qs.qi + 1) + ' of ' + questions.length, question: curQ.q, revealed: qs.revealed,
+          canReset: qs.qi > 0 || qs.revealed || done,
+          onReset: () => this.resetQuiz(openL.id),
           options: curQ.options.map((opt, oi) => {
             const chosen = qs.selected === oi, isCorrect = oi === curQ.correct;
             let bg = '#fff', bd = t.border, mk = String.fromCharCode(65 + oi), mkBg = t.railHover, mkFg = t.sub;
@@ -638,16 +763,21 @@ export default class App extends React.Component {
 
     // ---- settings / agent ----
     const ag = s.agent, connected = ag.connected;
-    const modelLabel = (MODELS.find(m => m.id === ag.model) || MODELS[0]).label;
+    const isCli = ag.method === 'cli', isApi = ag.method === 'api', isLocal = ag.method === 'local';
+    // Model choices come from the backend (live for API/Local, static for CLI).
+    const modelList = (ag.models && ag.models.length) ? ag.models : (isLocal ? [] : MODELS);
+    const modelLabel = (modelList.find(m => m.id === ag.model) || {}).label || ag.model || (MODELS[0] && MODELS[0].label);
     const agentPill = connected
       ? { label: 'Connected', color: '#15803d', bg: '#ecfdf5', dot: '#16a34a' }
       : { label: 'Offline', color: t.sub, bg: t.railHover, dot: '#b3afa8' };
     const PROVIDERS = [
-      { id: 'cli', title: 'Claude Code', desc: 'Uses your Claude Code sign-in — no API key', badge: 'C', soon: false },
-      { id: 'api', title: 'Anthropic API', desc: 'Claude via an Anthropic API key', badge: 'A', soon: false },
-      { id: 'copilot', title: 'GitHub Copilot', desc: 'Use your Copilot subscription', badge: 'GH', soon: true },
-      { id: 'cursor', title: 'Cursor Agent', desc: 'Connect the Cursor agent', badge: 'Cu', soon: true },
+      { id: 'cli', title: 'Claude Code', desc: 'Uses your Claude Code sign-in — no API key', badge: 'C', soon: false, docs: 'https://docs.claude.com/en/docs/claude-code' },
+      { id: 'api', title: 'Anthropic API', desc: 'Claude via an Anthropic API key', badge: 'A', soon: false, docs: 'https://console.anthropic.com/settings/keys' },
+      { id: 'local', title: 'Local model', desc: 'Ollama, LM Studio — any OpenAI-compatible server', badge: 'L', soon: false, docs: 'https://ollama.com/download' },
+      { id: 'copilot', title: 'GitHub Copilot', desc: 'Use your Copilot subscription', badge: 'GH', soon: true, docs: 'https://docs.github.com/copilot' },
+      { id: 'cursor', title: 'Cursor Agent', desc: 'Connect the Cursor agent', badge: 'Cu', soon: true, docs: 'https://docs.cursor.com' },
     ];
+    const currentProvider = PROVIDERS.find(p => p.id === ag.method) || PROVIDERS[0];
     const agentProviders = PROVIDERS.map(p => {
       const on = !p.soon && ag.method === p.id;
       return {
@@ -660,34 +790,42 @@ export default class App extends React.Component {
         tagStyle: { flexShrink: 0, fontSize: '10.5px', fontWeight: 600, letterSpacing: '0.03em', textTransform: 'uppercase', padding: '3px 8px', borderRadius: '999px', color: p.soon ? t.faint : '#15803d', background: p.soon ? t.railHover : '#ecfdf5' },
       };
     });
-    const modelOptions = MODELS.map(m => {
+    const modelOptions = modelList.map(m => {
       const on = ag.model === m.id;
-      return { id: m.id, label: m.label, onPick: () => this.onModel(m.id),
-        style: { border: '1.5px solid ' + (on ? t.accent : t.border), background: on ? t.accent + '10' : '#fff', color: on ? t.accent : t.sub, borderRadius: '999px', padding: '7px 14px', fontFamily: 'inherit', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.15s' },
+      return { id: m.id, label: m.label || m.id, onPick: () => this.onModel(m.id),
+        style: { border: '1.5px solid ' + (on ? t.accent : t.border), background: on ? t.accent + '10' : '#fff', color: on ? t.accent : t.sub, borderRadius: '999px', padding: '7px 14px', fontFamily: 'inherit', fontSize: '13px', fontWeight: 500, cursor: 'pointer', transition: 'all 0.15s', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
         hover: on ? '' : 'border-color: ' + t.accent + ';' };
     });
-    const isCli = ag.method === 'cli';
+    const providerName = isCli ? 'Claude Code' : isApi ? 'Anthropic API' : isLocal ? 'Local' : currentProvider.title;
     const settingsVals = {
       settingsOpen: s.settingsOpen, onOpenSettings: this.onOpenSettings, onCloseSettings: this.onCloseSettings,
       agentPill, agentProviders, modelOptions,
-      methodIsCli: isCli, methodIsApi: !isCli,
-      onCopyCmd: this.onCopyCmd,
+      methodIsCli: isCli, methodIsApi: isApi, methodIsLocal: isLocal,
+      providerDocs: currentProvider.docs, onOpenDocs: () => this.openDocs(currentProvider.docs),
       agentApiKey: ag.apiKey, onApiKey: this.onApiKey,
       apiKeyPlaceholder: ag.hasApiKey ? '••••••••  (key saved — enter a new one to replace)' : 'sk-ant-…  (optional if set via environment)',
+      baseUrl: ag.baseUrl, onBaseUrl: this.onBaseUrl,
+      onRefreshModels: this.refreshModels, modelsLoading: ag.modelsLoading, modelsError: ag.modelsError,
+      modelListEmpty: modelOptions.length === 0,
+      showModelRefresh: isLocal || isApi,
       agentConnected: connected, agentDisconnected: !connected,
       onConnect: this.onConnect, onDisconnect: this.onDisconnect,
-      connectLabel: ag.connecting ? 'Connecting…' : (isCli ? 'Connect Claude Code' : 'Connect'),
+      connectLabel: ag.connecting ? 'Connecting…' : (isCli ? 'Connect Claude Code' : isLocal ? 'Connect local model' : 'Connect'),
       connectBtnBg: ag.connecting ? '#cdcac4' : t.accent,
       agentHint: ag.error ? ag.error : (connected ? ('Teach is generating with ' + modelLabel + '.') : 'Connect to start generating lessons.'),
       agentHintColor: ag.error ? '#dc2626' : t.faint,
       agentCard: connected
-        ? { title: (isCli ? 'Claude Code · ' : 'Anthropic API · ') + modelLabel, subtitle: isCli ? 'Using your local Claude Code sign-in' : (ag.hasApiKey ? 'Using your saved API key' : 'Using environment credentials'), border: '#a7f3d0', bg: '#ecfdf5', iconBg: '#16a34a', iconColor: '#fff' }
-        : { title: 'No agent connected', subtitle: 'Teach needs Claude to write lessons.', border: t.border, bg: '#fff', iconBg: t.railHover, iconColor: t.sub },
+        ? { title: providerName + ' · ' + modelLabel, subtitle: isCli ? 'Using your local Claude Code sign-in' : isLocal ? ag.baseUrl : (ag.hasApiKey ? 'Using your saved API key' : 'Using environment credentials'), border: '#a7f3d0', bg: '#ecfdf5', iconBg: '#16a34a', iconColor: '#fff' }
+        : { title: 'No agent connected', subtitle: 'Teach needs a model to write lessons.', border: t.border, bg: '#fff', iconBg: t.railHover, iconColor: t.sub },
     };
 
     return {
       t,
       showApp: true,
+      debugOpen: s.debugOpen, logs: s.logs, onToggleDebug: this.toggleDebug, onClearDebug: this.clearLogs,
+      onOpenTeachSkill: () => this.openDocs('https://github.com/mattpocock/skills'),
+      appVersion: s.appVersion, update: s.update, updateDismissed: s.updateDismissed,
+      onCheckUpdate: this.checkUpdate, onDownloadUpdate: this.downloadUpdate, onInstallUpdate: this.installUpdate, onDismissUpdate: this.dismissUpdate,
       landingInput: s.landingInput, placeholder: this.placeholders[s.phIndex], inputBorder: s.focused ? t.accent : t.border,
       onLandingInput: this.onLandingInput, onLandingKey: this.onLandingKey, onFocus: this.onFocus, onBlur: this.onBlur, onStart: this.onStart, examples,
       sidebarVisible: mobile ? s.mobileNav : true,
@@ -751,6 +889,9 @@ export default class App extends React.Component {
                   <span style={c.chevStyle}><Svg size={12} sw={2.4}><path d="m9 18 6-6-6-6" /></Svg></span>
                 </button>
                 <span style={{ flex: 1, minWidth: 0, fontSize: '13.5px', fontWeight: 500, color: t.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.title}</span>
+                <H as="button" onClick={c.onDelete} title="Delete this course" style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.faint, padding: 2, display: 'flex', flexShrink: 0, borderRadius: 6 }} hover={'color: #dc2626;'}>
+                  <IcnTrash size={13} />
+                </H>
               </H>
               {c.expanded && (
                 <div style={{ margin: '2px 0 4px 15px', paddingLeft: 13, borderLeft: `1.5px solid ${t.border}`, animation: 'tuiExpand 0.2s ease' }}>
@@ -758,6 +899,9 @@ export default class App extends React.Component {
                     <H key={l.id} onClick={l.onOpen} style={l.rowStyle} hover={t.railHoverCss}>
                       <span style={l.dotStyle}>{l.dot}</span>
                       <span style={{ flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.title}</span>
+                      <H as="button" onClick={l.onDelete} title="Delete this lesson and everything after it" style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.faint, padding: 2, display: 'flex', flexShrink: 0, borderRadius: 6 }} hover={'color: #dc2626;'}>
+                        <IcnTrash size={13} />
+                      </H>
                     </H>
                   ))}
                   <div style={{ fontSize: '11.5px', color: t.faint, padding: '5px 9px 3px' }}>{c.moreLabel}</div>
@@ -768,6 +912,19 @@ export default class App extends React.Component {
         </div>
 
         <div style={{ borderTop: `1px solid ${t.border}`, padding: '8px 10px' }}>
+          <H onClick={v.onOpenTeachSkill} title="The original /teach skill by Matt Pocock — opens GitHub" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 10, cursor: 'pointer' }} hover={t.railHoverCss}>
+            <Svg size={16} stroke={t.accent} style={{ flexShrink: 0 }}><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z" /></Svg>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: t.ink }}>Built on the <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>/teach</span> skill</div>
+              <div style={{ fontSize: '11px', color: t.faint, marginTop: 1 }}>by Matt Pocock · GitHub</div>
+            </div>
+            <Svg size={13} stroke={t.faint} style={{ flexShrink: 0 }}><path d="M7 17L17 7M7 7h10v10" /></Svg>
+          </H>
+          <H onClick={v.onToggleDebug} title="Agent activity console (⌘`)" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 10, cursor: 'pointer' }} hover={t.railHoverCss}>
+            <Svg size={16} stroke={v.debugOpen ? t.accent : t.sub} style={{ flexShrink: 0 }}><path d="M4 17l6-6-6-6" /><path d="M12 19h8" /></Svg>
+            <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: v.debugOpen ? t.accent : t.ink }}>Debug console</div>
+            <span style={{ fontSize: '11px', color: t.faint }}>⌘`</span>
+          </H>
           <H onClick={v.onOpenSettings} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 10px', borderRadius: 10, cursor: 'pointer' }} hover={t.railHoverCss}>
             <Svg size={17} stroke={t.sub} style={{ flexShrink: 0 }}><circle cx="12" cy="12" r="3" /><path d={GEAR_PATH} /></Svg>
             <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: t.ink }}>Settings</div>
@@ -775,6 +932,10 @@ export default class App extends React.Component {
               <span style={{ width: 6, height: 6, borderRadius: 999, background: v.agentPill.dot }} />{v.agentPill.label}
             </span>
           </H>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 12px 2px' }}>
+            <span style={{ fontSize: '11px', color: t.faint }}>v{v.appVersion || '…'}</span>
+            <button onClick={v.onCheckUpdate} style={{ border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: '11px', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>Check for updates</button>
+          </div>
         </div>
       </aside>
     );
@@ -783,12 +944,9 @@ export default class App extends React.Component {
   renderLanding(v) {
     const t = v.t;
     return (
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ height: 56, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 11, padding: '0 22px' }}>
-          <button onClick={v.onOpenMobile} style={{ display: v.hamburgerDisplay, border: 'none', background: 'transparent', cursor: 'pointer', color: t.sub, padding: 6, marginLeft: -6 }}><IcnMenu /></button>
-        </div>
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px 24px 90px', background: t.landingBg }}>
-          <div style={{ width: '100%', maxWidth: 620, display: 'flex', flexDirection: 'column', alignItems: 'center', animation: 'tuiFadeUp 0.5s cubic-bezier(0.22,1,0.36,1)' }}>
+      <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px 24px 90px', background: t.landingBg }}>
+        <button onClick={v.onOpenMobile} style={{ position: 'absolute', top: 14, left: 16, display: v.hamburgerDisplay, border: 'none', background: 'transparent', cursor: 'pointer', color: t.sub, padding: 6, zIndex: 2 }}><IcnMenu /></button>
+        <div style={{ width: '100%', maxWidth: 620, display: 'flex', flexDirection: 'column', alignItems: 'center', animation: 'tuiFadeUp 0.5s cubic-bezier(0.22,1,0.36,1)' }}>
             <h1 style={{ fontSize: 44, lineHeight: 1.06, fontWeight: 500, letterSpacing: '-0.03em', textAlign: 'center', margin: '0 0 32px', color: t.ink }}>What would you like to learn?</h1>
             <div style={{ width: '100%', position: 'relative', background: '#fff', border: `1.5px solid ${v.inputBorder}`, borderRadius: 20, boxShadow: '0 14px 40px -20px rgba(28,27,25,0.24), 0 2px 8px rgba(0,0,0,0.03)', transition: 'border-color 0.2s' }}>
               <textarea value={v.landingInput} onChange={v.onLandingInput} onKeyDown={v.onLandingKey} onFocus={v.onFocus} onBlur={v.onBlur} rows={1} placeholder={v.placeholder} style={{ width: '100%', border: 'none', outline: 'none', resize: 'none', background: 'transparent', fontFamily: 'inherit', fontSize: 18, lineHeight: 1.5, color: t.ink, padding: '19px 58px 19px 22px', maxHeight: 180, display: 'block' }} />
@@ -804,7 +962,6 @@ export default class App extends React.Component {
             <div style={{ fontSize: 12, color: t.faint, marginTop: 26 }}>Every course is written on the fly with the <span style={{ fontFamily: "'Geist Mono', monospace" }}>/teach</span> skill.</div>
           </div>
         </div>
-      </div>
     );
   }
 
@@ -938,7 +1095,14 @@ export default class App extends React.Component {
 
               {v.hasQuiz && (
                 <div style={{ marginTop: 34, background: t.quizBg, border: `1px solid ${t.quizBorder}`, borderRadius: 18, padding: '24px 26px' }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.accent, marginBottom: 10 }}>Quick check · {v.quiz.progress}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                    <div style={{ flex: 1, fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.accent }}>Quick check · {v.quiz.progress}</div>
+                    {v.quiz.canReset && (
+                      <H as="button" onClick={v.quiz.onReset} title="Start this quiz over" style={{ border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: 12, fontWeight: 500, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 5, padding: '2px 4px', borderRadius: 7 }} hover={'color: ' + t.accent + ';'}>
+                        <Svg size={13}><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" /><path d="M3 21v-5h5" /></Svg>Reset quiz
+                      </H>
+                    )}
+                  </div>
                   <div style={{ fontSize: 19, fontWeight: 600, letterSpacing: '-0.01em', margin: '0 0 18px', color: t.ink, lineHeight: 1.4 }}>{v.quiz.question}</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                     {v.quiz.options.map((o, i) => (
@@ -1104,14 +1268,12 @@ export default class App extends React.Component {
 
             {v.methodIsCli && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Teach talks to your local Claude Code and uses the account you're already signed in with — no API key needed. If you don't have it yet, install and sign in once:</div>
-                <div style={{ position: 'relative', background: '#1c1b19', borderRadius: 12, padding: '14px 44px 14px 16px', fontFamily: "'Geist Mono', monospace", fontSize: 13, color: '#e9e7e2', overflowX: 'auto', whiteSpace: 'nowrap' }}>
-                  {'npm install -g @anthropic-ai/claude-code && claude'}
-                  <H as="button" onClick={v.onCopyCmd} title="Copy" style={{ position: 'absolute', right: 8, top: 8, border: 'none', background: 'rgba(255,255,255,0.1)', color: '#e9e7e2', borderRadius: 8, padding: 6, cursor: 'pointer', display: 'flex' }} hover="background: rgba(255,255,255,0.2);">
-                    <Svg size={14}><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></Svg>
-                  </H>
-                </div>
-                <div style={{ fontSize: '12.5px', color: t.faint, lineHeight: 1.5 }}>Then use <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>/login</span> inside Claude Code. Connect runs a quick test message to confirm everything works.</div>
+                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Teach talks to your local Claude Code and uses the account you're already signed in with — no API key needed. If you don't have it yet, install it and sign in once with <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>/login</span>. Connect runs a quick test message to confirm it works.</div>
+                <H as="button" onClick={v.onOpenDocs} style={{ alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 7, border: `1px solid ${t.border}`, background: '#fff', color: t.ink, borderRadius: 10, padding: '8px 13px', fontFamily: 'inherit', fontSize: 13, fontWeight: 500, cursor: 'pointer' }} hover={t.accentBorderCss}>
+                  <Svg size={14}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></Svg>
+                  Read the Claude Code install guide
+                  <Svg size={13}><path d="M7 17L17 7M7 7h10v10" /></Svg>
+                </H>
               </div>
             )}
 
@@ -1122,16 +1284,40 @@ export default class App extends React.Component {
                   <span style={{ fontSize: '12.5px', color: t.faint, flexShrink: 0 }}>API key</span>
                   <input type="password" value={v.agentApiKey} onChange={v.onApiKey} placeholder={v.apiKeyPlaceholder} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: "'Geist Mono', monospace", fontSize: 13, color: t.ink, padding: '8px 0' }} />
                 </div>
+                <button onClick={v.onOpenDocs} style={{ alignSelf: 'flex-start', border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: '12.5px', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>Get an API key →</button>
+              </div>
+            )}
+
+            {v.methodIsLocal && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ fontSize: 13, color: t.body, lineHeight: 1.55 }}>Point Teach at any OpenAI-compatible server running on your machine or network — <span style={{ fontFamily: "'Geist Mono', monospace", fontSize: 12 }}>Ollama</span>, LM Studio, llama.cpp, and others. Teach reads the model list straight from the server. Nothing leaves your machine.</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#fff', border: `1.5px solid ${t.border}`, borderRadius: 11, padding: '4px 4px 4px 14px' }}>
+                  <span style={{ fontSize: '12.5px', color: t.faint, flexShrink: 0 }}>Server URL</span>
+                  <input type="text" value={v.baseUrl} onChange={v.onBaseUrl} placeholder="http://localhost:11434/v1" spellCheck={false} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontFamily: "'Geist Mono', monospace", fontSize: 13, color: t.ink, padding: '8px 0' }} />
+                  <H as="button" onClick={v.onRefreshModels} title="Reload models from this server" style={{ border: `1px solid ${t.border}`, background: '#fff', color: t.sub, borderRadius: 8, padding: '6px 10px', fontFamily: 'inherit', fontSize: '12px', cursor: 'pointer', flexShrink: 0 }} hover={t.accentBorderCss}>{v.modelsLoading ? 'Loading…' : 'Reload'}</H>
+                </div>
+                <button onClick={v.onOpenDocs} style={{ alignSelf: 'flex-start', border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: '12.5px', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>Install Ollama →</button>
               </div>
             )}
 
             <div>
-              <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: t.faint, marginBottom: 9 }}>Model</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {v.modelOptions.map(mo => (
-                  <H as="button" key={mo.id} onClick={mo.onPick} style={mo.style} hover={mo.hover}>{mo.label}</H>
-                ))}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 9 }}>
+                <div style={{ flex: 1, fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: t.faint }}>Model</div>
+                {v.showModelRefresh && (
+                  <button onClick={v.onRefreshModels} style={{ border: 'none', background: 'transparent', color: t.sub, fontFamily: 'inherit', fontSize: '11.5px', cursor: 'pointer', padding: 0 }}>{v.modelsLoading ? 'Loading…' : '↻ Refresh'}</button>
+                )}
               </div>
+              {v.modelOptions.length > 0 ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {v.modelOptions.map(mo => (
+                    <H as="button" key={mo.id} onClick={mo.onPick} style={mo.style} hover={mo.hover}>{mo.label}</H>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ fontSize: '12.5px', color: v.modelsError ? '#dc2626' : t.faint, lineHeight: 1.5, padding: '4px 0' }}>
+                  {v.modelsLoading ? 'Loading models…' : (v.modelsError || (v.methodIsLocal ? 'No models found — start your server and pull a model, then Reload.' : 'No models available.'))}
+                </div>
+              )}
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 4, borderTop: `1px solid ${t.borderSoft}` }}>
@@ -1145,6 +1331,86 @@ export default class App extends React.Component {
             </div>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  renderDebug(v) {
+    const logs = v.logs;
+    return (
+      <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: '42%', minHeight: 220, zIndex: 90, display: 'flex', flexDirection: 'column', background: '#0f1115', borderTop: '1px solid #23262d', boxShadow: '0 -14px 44px -14px rgba(0,0,0,0.55)', animation: 'tuiSlideUp 0.22s cubic-bezier(0.22,1,0.36,1)', fontFamily: "'Geist Mono', ui-monospace, monospace" }}>
+        <div style={{ flexShrink: 0, height: 38, display: 'flex', alignItems: 'center', gap: 10, padding: '0 12px', borderBottom: '1px solid #23262d' }}>
+          <span style={{ width: 8, height: 8, borderRadius: 999, background: logs.length ? '#34d399' : '#4b5563', flexShrink: 0 }} />
+          <span style={{ fontSize: 12, fontWeight: 600, color: '#e6e8ec', letterSpacing: '0.02em' }}>Agent activity</span>
+          <span style={{ fontSize: 11, color: '#6b7280' }}>{logs.length} event{logs.length === 1 ? '' : 's'}</span>
+          <div style={{ flex: 1 }} />
+          <H as="button" onClick={v.onClearDebug} style={{ border: '1px solid #2b2f37', background: 'transparent', color: '#9ca3af', borderRadius: 7, padding: '4px 10px', fontFamily: 'inherit', fontSize: '11.5px', cursor: 'pointer' }} hover={'border-color: #3f444d; color: #e6e8ec;'}>Clear</H>
+          <button onClick={v.onToggleDebug} title="Close (⌘`)" style={{ border: 'none', background: 'transparent', color: '#9ca3af', cursor: 'pointer', display: 'flex', padding: 4 }}><IcnX size={16} /></button>
+        </div>
+        <div ref={this._logRef} className="tui-scroll" style={{ flex: 1, overflowY: 'auto', padding: '8px 12px', fontSize: '12px', lineHeight: 1.65 }}>
+          {logs.length === 0 && (
+            <div style={{ color: '#6b7280', padding: '6px 0' }}>No activity yet. Start a course or ask a question — the agent’s steps stream here live.</div>
+          )}
+          {logs.map(e => (
+            <div key={e.id} style={{ display: 'flex', gap: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-word', padding: '1px 0' }}>
+              <span style={{ color: '#4b5563', flexShrink: 0 }}>{this.fmtLogTime(e.time)}</span>
+              <span style={{ color: this.logColor(e), flexShrink: 0, minWidth: 62 }}>{e.tag}</span>
+              <span style={{ color: this.msgColor(e), flex: 1 }}>{e.msg}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  renderUpdate(v) {
+    const t = v.t, u = v.update || {};
+    const show = u.type === 'progress' || (!v.updateDismissed && (u.type === 'available' || u.type === 'downloaded'));
+    if (!show) return null;
+    const card = { position: 'fixed', right: 20, bottom: v.debugOpen ? 'calc(42% + 16px)' : 20, zIndex: 95, width: 320, maxWidth: 'calc(100vw - 40px)', background: '#fff', border: `1px solid ${t.border}`, borderRadius: 14, boxShadow: '0 18px 50px -16px rgba(28,27,25,0.4)', padding: '16px 18px', animation: 'tuiFadeUp 0.3s cubic-bezier(0.22,1,0.36,1)' };
+    const primaryBtn = { border: 'none', background: t.accent, color: '#fff', fontFamily: 'inherit', fontWeight: 500, fontSize: 13, padding: '8px 14px', borderRadius: 10, cursor: 'pointer' };
+    const ghostBtn = { border: `1px solid ${t.border}`, background: '#fff', color: t.sub, fontFamily: 'inherit', fontWeight: 500, fontSize: 13, padding: '8px 12px', borderRadius: 10, cursor: 'pointer' };
+    let title, body, actions;
+    if (u.type === 'available') {
+      title = 'Update available';
+      body = `Version ${u.version} is ready to download.`;
+      actions = (
+        <>
+          <button onClick={v.onDownloadUpdate} style={primaryBtn}>Download</button>
+          <button onClick={v.onDismissUpdate} style={ghostBtn}>Later</button>
+        </>
+      );
+    } else if (u.type === 'progress') {
+      title = 'Downloading update…';
+      body = (
+        <div style={{ marginTop: 4 }}>
+          <div style={{ height: 6, borderRadius: 999, background: t.railHover, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: (u.percent || 0) + '%', background: t.accent, transition: 'width 0.2s' }} />
+          </div>
+          <div style={{ fontSize: 11.5, color: t.faint, marginTop: 6 }}>{u.percent || 0}%</div>
+        </div>
+      );
+      actions = null;
+    } else {
+      title = 'Update ready';
+      body = `Version ${u.version} downloaded. Restart to install.`;
+      actions = (
+        <>
+          <button onClick={v.onInstallUpdate} style={primaryBtn}>Restart & update</button>
+          <button onClick={v.onDismissUpdate} style={ghostBtn}>Later</button>
+        </>
+      );
+    }
+    return (
+      <div style={card}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 8 }}>
+          <span style={{ width: 22, height: 22, borderRadius: 7, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: t.accent + '18', color: t.accent }}>
+            <Svg size={14}><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></Svg>
+          </span>
+          <span style={{ fontSize: 14, fontWeight: 600, color: t.ink }}>{title}</span>
+        </div>
+        <div style={{ fontSize: 13, color: t.body, lineHeight: 1.5 }}>{body}</div>
+        {actions && <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>{actions}</div>}
       </div>
     );
   }
@@ -1185,6 +1451,8 @@ export default class App extends React.Component {
         )}
 
         {v.settingsOpen && this.renderSettings(v)}
+        {v.debugOpen && this.renderDebug(v)}
+        {this.renderUpdate(v)}
       </div>
     );
   }

@@ -4,17 +4,72 @@
   "version": "0.1.0",
   "description": "Teach — every course is written on the fly",
   "private": true,
+  "author": "Oguzcan Karakoc",
+  "homepage": "https://github.com/OguzcanKarakoc/teach-electron",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OguzcanKarakoc/teach-electron.git"
+  },
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on tcp:127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "build": "vite build",
-    "start": "npm run build && electron ."
+    "start": "npm run build && electron .",
+    "pack": "npm run build && electron-builder --publish never",
+    "release": "npm run build && electron-builder --publish always"
+  },
+  "build": {
+    "appId": "com.oguzcankarakoc.teach",
+    "productName": "Teach",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "OguzcanKarakoc",
+      "repo": "teach-electron"
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] }
+      ],
+      "category": "public.app-category.education",
+      "identity": null,
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
+    },
+    "dmg": {
+      "writeUpdateInfo": false
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] }
+      ],
+      "category": "Education"
+    }
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.5.0",
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
     "electron": "^37.2.0",
+    "electron-builder": "^25.1.8",
     "vite": "^6.3.5",
     "wait-on": "^8.0.1"
   },
@@ -22,6 +77,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.198",
     "@anthropic-ai/sdk": "^0.110.0",
     "dompurify": "^3.4.11",
+    "electron-updater": "^6.8.9",
     "marked": "^18.0.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

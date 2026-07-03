@@ -2,6 +2,7 @@ const { app, BrowserWindow, shell, ipcMain, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const agent = require('./agent.cjs');
+const { autoUpdater } = require('electron-updater');
 
 // In screenshot mode the window may be occluded; keep Chromium painting anyway.
 if (process.env.TEACH_SCREENSHOT) {
@@ -27,40 +28,109 @@ function loadSettings() {
   if (raw.apiKeyEnc && safeStorage.isEncryptionAvailable()) {
     try { apiKey = safeStorage.decryptString(Buffer.from(raw.apiKeyEnc, 'base64')); } catch (e) {}
   }
-  return { method: raw.method || 'cli', model: raw.model || agent.DEFAULT_MODEL, connected: !!raw.connected, apiKey };
+  return { method: raw.method || 'cli', model: raw.model || agent.DEFAULT_MODEL, connected: !!raw.connected, apiKey, baseUrl: raw.baseUrl || 'http://localhost:11434/v1' };
 }
 
-function saveSettings({ method, model, connected, apiKey }) {
-  const raw = { method, model, connected };
+function saveSettings({ method, model, connected, apiKey, baseUrl }) {
+  const raw = { method, model, connected, baseUrl };
   if (apiKey && safeStorage.isEncryptionAvailable()) {
     raw.apiKeyEnc = safeStorage.encryptString(apiKey).toString('base64');
   }
   writeJson(settingsPath(), raw);
 }
 
+// ---------- debug log relay ----------
+// Keep a rolling buffer so a window that opens the console late still sees
+// recent history, and forward every new entry to all open windows.
+const LOG_MAX = 800;
+const logBuffer = [];
+function pushLog(entry) {
+  logBuffer.push(entry);
+  if (logBuffer.length > LOG_MAX) logBuffer.splice(0, logBuffer.length - LOG_MAX);
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) { try { w.webContents.send('agent:log', entry); } catch (e) {} }
+  }
+}
+agent.onLog(pushLog);
+
+// ---------- auto-update ----------
+// Windows (NSIS) and Linux (AppImage) auto-update fully. macOS is unsigned, so
+// no update feed is published for it — the updater simply finds nothing and the
+// error is swallowed; users update by re-downloading the .dmg. Add an Apple
+// Developer ID + a mac `zip` target later and this path lights up for macOS too.
+function sendUpdate(payload) {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) { try { w.webContents.send('update:status', payload); } catch (e) {} }
+  }
+  agent.log('update', payload.type + (payload.version ? ' · ' + payload.version : '') + (payload.message ? ' · ' + payload.message : ''), payload.type === 'error' ? 'error' : 'info');
+}
+
+let _updaterReady = false;
+function setupUpdater() {
+  if (_updaterReady) return;
+  _updaterReady = true;
+  autoUpdater.autoDownload = false;          // notify first, download on user request
+  autoUpdater.autoInstallOnAppQuit = true;   // if downloaded, apply on next quit
+  autoUpdater.on('checking-for-update', () => sendUpdate({ type: 'checking' }));
+  autoUpdater.on('update-available', (info) => sendUpdate({ type: 'available', version: info && info.version }));
+  autoUpdater.on('update-not-available', () => sendUpdate({ type: 'none' }));
+  autoUpdater.on('download-progress', (p) => sendUpdate({ type: 'progress', percent: Math.round((p && p.percent) || 0) }));
+  autoUpdater.on('update-downloaded', (info) => sendUpdate({ type: 'downloaded', version: info && info.version }));
+  autoUpdater.on('error', (err) => sendUpdate({ type: 'error', message: (err && err.message) || String(err) }));
+  // Kick off a background check shortly after launch.
+  autoUpdater.checkForUpdates().catch((e) => sendUpdate({ type: 'error', message: (e && e.message) || String(e) }));
+}
+
 // ---------- IPC ----------
 
 let settings = null;
+function configureAgent() {
+  agent.configure({ method: settings.method, apiKey: settings.apiKey, model: settings.model, baseUrl: settings.baseUrl });
+}
 
 function registerIpc() {
   settings = loadSettings();
-  agent.configure({ method: settings.method, apiKey: settings.apiKey, model: settings.model });
+  configureAgent();
 
   ipcMain.handle('state:load', () => ({
     data: readJson(dataPath(), null),
-    settings: { method: settings.method, model: settings.model, connected: settings.connected, hasApiKey: !!settings.apiKey },
+    settings: { method: settings.method, model: settings.model, connected: settings.connected, hasApiKey: !!settings.apiKey, baseUrl: settings.baseUrl },
   }));
 
   ipcMain.handle('state:save', (_e, data) => { writeJson(dataPath(), data); return true; });
 
-  ipcMain.handle('agent:connect', async (_e, { method, apiKey, model }) => {
+  ipcMain.handle('log:history', () => logBuffer);
+  ipcMain.handle('log:clear', () => { logBuffer.length = 0; return true; });
+
+  ipcMain.handle('app:version', () => app.getVersion());
+  ipcMain.handle('app:openExternal', (_e, url) => { try { if (/^https?:\/\//i.test(url)) shell.openExternal(url); } catch (e) {} return true; });
+  ipcMain.handle('update:check', () => {
+    if (!app.isPackaged) { sendUpdate({ type: 'none' }); return { ok: false, error: 'Updates only run in a packaged build.' }; }
+    autoUpdater.checkForUpdates().catch((e) => sendUpdate({ type: 'error', message: (e && e.message) || String(e) }));
+    return { ok: true };
+  });
+  ipcMain.handle('update:download', () => {
+    autoUpdater.downloadUpdate().catch((e) => sendUpdate({ type: 'error', message: (e && e.message) || String(e) }));
+    return { ok: true };
+  });
+  ipcMain.handle('update:install', () => { autoUpdater.quitAndInstall(); return { ok: true }; });
+
+  ipcMain.handle('agent:models', async () => {
+    try { return { ok: true, models: await agent.listModels() }; }
+    catch (e) { agent.log('connect', 'list models failed · ' + ((e && e.message) || e), 'error'); return { ok: false, error: agent.errMessage(e) }; }
+  });
+
+  ipcMain.handle('agent:connect', async (_e, { method, apiKey, model, baseUrl }) => {
     try {
       if (method) settings.method = method;
       if (apiKey) settings.apiKey = apiKey;
       if (model) settings.model = model;
-      agent.configure({ method: settings.method, apiKey: settings.apiKey, model: settings.model });
+      if (baseUrl) settings.baseUrl = baseUrl;
+      configureAgent();
       const info = await agent.verifyConnection();
+      if (info.model) settings.model = info.model;
       settings.connected = true;
+      configureAgent();
       saveSettings(settings);
       return { ok: true, model: info.model, displayName: info.displayName };
     } catch (e) {
@@ -74,37 +144,44 @@ function registerIpc() {
     settings.connected = false;
     settings.apiKey = '';
     saveSettings(settings);
-    agent.configure({ method: settings.method, apiKey: '', model: settings.model });
+    configureAgent();
     return { ok: true };
   });
 
   ipcMain.handle('agent:setMethod', (_e, method) => {
     settings.method = method;
     saveSettings(settings);
-    agent.configure({ method, apiKey: settings.apiKey, model: settings.model });
+    configureAgent();
     return { ok: true };
   });
 
   ipcMain.handle('agent:setModel', (_e, model) => {
     settings.model = model;
     saveSettings(settings);
-    agent.configure({ method: settings.method, apiKey: settings.apiKey, model });
+    configureAgent();
+    return { ok: true };
+  });
+
+  ipcMain.handle('agent:setBaseUrl', (_e, baseUrl) => {
+    settings.baseUrl = baseUrl;
+    saveSettings(settings);
+    configureAgent();
     return { ok: true };
   });
 
   ipcMain.handle('teach:start', async (_e, { prompt }) => {
     try { return { ok: true, result: await agent.startCourse({ prompt }) }; }
-    catch (e) { return { ok: false, error: agent.errMessage(e) }; }
+    catch (e) { agent.log('course', 'start failed · ' + ((e && e.message) || e), 'error'); return { ok: false, error: agent.errMessage(e) }; }
   });
 
   ipcMain.handle('teach:next', async (_e, payload) => {
     try { return { ok: true, result: await agent.nextLesson(payload) }; }
-    catch (e) { return { ok: false, error: agent.errMessage(e) }; }
+    catch (e) { agent.log('lesson', 'failed · ' + ((e && e.message) || e), 'error'); return { ok: false, error: agent.errMessage(e) }; }
   });
 
   ipcMain.handle('teach:thread', async (_e, payload) => {
     try { return { ok: true, result: await agent.askThread(payload) }; }
-    catch (e) { return { ok: false, error: agent.errMessage(e) }; }
+    catch (e) { agent.log('thread', 'failed · ' + ((e && e.message) || e), 'error'); return { ok: false, error: agent.errMessage(e) }; }
   });
 }
 
@@ -158,6 +235,7 @@ function createWindow() {
 app.whenReady().then(() => {
   registerIpc();
   createWindow();
+  if (app.isPackaged) setupUpdater();
 });
 
 app.on('window-all-closed', () => {

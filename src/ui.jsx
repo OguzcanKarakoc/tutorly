@@ -14,6 +14,25 @@ function parseCss(css) {
   return out;
 }
 
+// Merge a parsed hover declaration onto the base style. A hover `border-color`
+// is folded into the base `border` shorthand instead of being layered on as a
+// longhand: setting `borderColor` over a `border` shorthand and then dropping it
+// on mouse-leave leaves the color at `currentColor` (the dark text color), so
+// the border looks stuck dark. Rewriting the shorthand keeps both states on the
+// same property, so React reverts it cleanly.
+function mergeHover(style, hoverStyle) {
+  const out = { ...style, ...hoverStyle };
+  if (out.borderColor && typeof out.border === 'string') {
+    const parts = out.border.trim().split(/\s+/);
+    if (parts.length >= 3) {
+      parts[parts.length - 1] = out.borderColor;
+      out.border = parts.join(' ');
+      delete out.borderColor;
+    }
+  }
+  return out;
+}
+
 // Element with a hover style, mirroring the design template's style-hover attribute.
 export function H({ as: Tag = 'div', hover, style, onMouseEnter, onMouseLeave, ...rest }) {
   const [hovered, setHovered] = useState(false);
@@ -21,7 +40,7 @@ export function H({ as: Tag = 'div', hover, style, onMouseEnter, onMouseLeave, .
   return (
     <Tag
       {...rest}
-      style={hovered && hover ? { ...style, ...hoverStyle } : style}
+      style={hovered && hover ? mergeHover(style, hoverStyle) : style}
       onMouseEnter={(e) => { setHovered(true); if (onMouseEnter) onMouseEnter(e); }}
       onMouseLeave={(e) => { setHovered(false); if (onMouseLeave) onMouseLeave(e); }}
     />
