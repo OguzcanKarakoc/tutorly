@@ -1,4 +1,6 @@
 const { Anthropic } = require('@anthropic-ai/sdk');
+const path = require('path');
+const fs = require('fs');
 const {
   TEACH_SYSTEM,
   THREAD_SYSTEM,
@@ -8,6 +10,31 @@ const {
 } = require('./teach-prompts.cjs');
 
 const DEFAULT_MODEL = 'claude-opus-4-8';
+
+// The Claude Code CLI ships as a per-arch native binary. In a packaged app it's
+// extracted out of the asar (see asarUnpack in package.json), but the SDK
+// resolves its path *inside* app.asar — and spawning an executable through the
+// asar file fails with "spawn ENOTDIR". Resolve the real unpacked binary and
+// hand it to the SDK via options.pathToClaudeCodeExecutable.
+let _claudeExe;
+function claudeExecutable() {
+  if (_claudeExe !== undefined) return _claudeExe;
+  _claudeExe = null;
+  try {
+    const pkg = `claude-agent-sdk-${process.platform}-${process.arch}`;
+    const bin = process.platform === 'win32' ? 'claude.exe' : 'claude';
+    const sdkDir = path.dirname(require.resolve('@anthropic-ai/claude-agent-sdk/package.json'));
+    const candidates = [
+      path.join(sdkDir, 'node_modules', '@anthropic-ai', pkg, bin), // packaged (nested)
+      path.join(sdkDir, '..', pkg, bin),                            // hoisted (dev)
+    ];
+    for (let c of candidates) {
+      if (c.includes(`app.asar${path.sep}`)) c = c.replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`);
+      if (fs.existsSync(c)) { _claudeExe = c; break; }
+    }
+  } catch (e) { /* leave null — SDK falls back to its own resolution */ }
+  return _claudeExe;
+}
 
 // ---------- debug log bus ----------
 // Every notable step an agent takes is emitted here; main.cjs relays it to the
@@ -155,7 +182,8 @@ function errMessage(e) {
 
 async function cliRun({ system, userText, schema }) {
   const { query } = await loadAgentSdk();
-  log('cli', 'query · model=' + cfg.model + ' · ' + (schema ? 'json_schema' : 'text'));
+  const exe = claudeExecutable();
+  log('cli', 'query · model=' + cfg.model + ' · ' + (schema ? 'json_schema' : 'text') + (exe ? ' · exe=' + exe : ''));
   const t0 = Date.now();
   const q = query({
     prompt: userText,
@@ -169,6 +197,9 @@ async function cliRun({ system, userText, schema }) {
       // is no tool-call loop to run away, so the extra turns only finish output.
       maxTurns: 8,
       persistSession: false,
+      // Point at the real (unpacked) native binary; the SDK's own resolution
+      // lands inside app.asar and spawning that yields "spawn ENOTDIR".
+      ...(exe ? { pathToClaudeCodeExecutable: exe } : {}),
       ...(schema ? { outputFormat: { type: 'json_schema', schema } } : {}),
     },
   });
