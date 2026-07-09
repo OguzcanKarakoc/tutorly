@@ -295,6 +295,10 @@ export default class App extends React.Component {
     try { return DOMPurify.sanitize(marked.parse(md)); } catch (e) { return ''; }
   }
 
+  mdHtml(text) {
+    try { return DOMPurify.sanitize(marked.parse(text || '')); } catch (e) { return ''; }
+  }
+
   // ---------- generation ----------
 
   updateCourse(courseId, fn) {
@@ -720,9 +724,11 @@ export default class App extends React.Component {
       });
       const mkBubble = (role) => role === 'user'
         ? { maxWidth: '88%', background: t.accent, color: '#fff', borderRadius: '14px 14px 4px 14px', padding: '9px 13px', fontSize: '13.5px', lineHeight: '1.5' }
-        : { maxWidth: '90%', background: '#fff', border: '1px solid ' + t.border, color: t.body, borderRadius: '14px 14px 14px 4px', padding: '10px 13px', fontSize: '13.5px', lineHeight: '1.55', whiteSpace: 'pre-wrap' };
+        : { maxWidth: '90%', background: '#fff', border: '1px solid ' + t.border, color: t.body, borderRadius: '14px 14px 14px 4px', padding: '10px 13px', fontSize: '13.5px', lineHeight: '1.55' };
       const msgs = activeTh ? activeTh.messages.map(m => ({
         text: m.text,
+        isAi: m.role !== 'user',
+        html: m.role !== 'user' ? this.mdHtml(m.text) : null,
         wrapStyle: { display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' },
         bubbleStyle: mkBubble(m.role),
       })) : [];
@@ -1175,7 +1181,11 @@ export default class App extends React.Component {
             )}
             <div className="tui-scroll" style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 11 }}>
               {v.panel.messages.map((mm, i) => (
-                <div key={i} style={mm.wrapStyle}><div style={mm.bubbleStyle}>{mm.text}</div></div>
+                <div key={i} style={mm.wrapStyle}>
+                  {mm.html != null
+                    ? <div className="tui-chat-prose" style={mm.bubbleStyle} dangerouslySetInnerHTML={{ __html: mm.html }} />
+                    : <div style={mm.bubbleStyle}>{mm.text}</div>}
+                </div>
               ))}
               {v.panel.empty && (
                 <div style={{ fontSize: 13, color: t.faint, lineHeight: 1.55, textAlign: 'center', padding: '18px 8px' }}>Ask anything about this{v.panel.emptyScope} — I'll answer with the lesson in mind.</div>
